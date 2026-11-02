@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: windows-build-${{ github.ref }}
@@ -183,18 +183,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: 创建并上传 GitHub Release
+      - name: 发布到公开仓库
         if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = "$env:GITHUB_REF_NAME"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag "dist\sbtun-windows-$env:TARGET_ARCH.zip" --title "sbtun $tag" --generate-notes
-            # Builds run in parallel; if another workflow created the release first, upload instead.
-            if ($LASTEXITCODE -ne 0) { gh release upload $tag "dist\sbtun-windows-$env:TARGET_ARCH.zip" --clobber }
-          } else {
-            gh release upload $tag "dist\sbtun-windows-$env:TARGET_ARCH.zip" --clobber
-          }
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: bash .github/publish.sh "dist/sbtun-windows-$TARGET_ARCH.zip"

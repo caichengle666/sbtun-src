@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: macos-build-${{ github.ref }}
@@ -161,16 +161,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: 创建并上传 GitHub Release
+      - name: 发布到公开仓库
         if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="$GITHUB_REF_NAME"
-          file="dist/sbtun-macos-$ARCH.zip"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$file" --clobber
-          else
-            # Builds run in parallel; if another workflow created the release first, upload instead.
-            gh release create "$tag" "$file" --title "sbtun $tag" --generate-notes || gh release upload "$tag" "$file" --clobber
-          fi
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: bash .github/publish.sh "dist/sbtun-macos-$ARCH.zip"

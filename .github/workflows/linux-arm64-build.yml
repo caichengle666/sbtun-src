@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: linux-arm64-build-${{ github.ref }}
@@ -169,15 +169,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: 创建并上传 GitHub Release
+      - name: 发布到公开仓库
         if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="$GITHUB_REF_NAME"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/sbtun-linux-arm64.tar.gz --clobber
-          else
-            # Builds run in parallel; if another workflow created the release first, upload instead.
-            gh release create "$tag" dist/sbtun-linux-arm64.tar.gz --title "sbtun $tag" --generate-notes || gh release upload "$tag" dist/sbtun-linux-arm64.tar.gz --clobber
-          fi
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: bash .github/publish.sh dist/sbtun-linux-arm64.tar.gz

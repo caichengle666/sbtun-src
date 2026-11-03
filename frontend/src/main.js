@@ -440,11 +440,21 @@ function renderOverview() {
           <button class="btn btn-ghost" id="testCurrentNode" ${current && !testing ? '' : 'disabled'}>${testing ? '测试中…' : '测试延迟'}</button>
         </div>
       </section>
-      <section class="card overview-route-panel"><span class="section-kicker">当前路由</span><strong>${escapeHtml(mode?.name || '未设置')}</strong><div class="route-line"><span>路由策略</span><b>${escapeHtml(mode?.desc || '请先选择路由模式')}</b></div><div class="route-line"><span>IPv6</span><b class="${state.config?.ipv6_enabled ? 'good' : ''}">${state.config?.ipv6_enabled ? '已启用' : '未启用'}</b></div><button class="btn btn-ghost overview-route-btn" data-view="routing">更改路由模式</button></section>
+      <section class="card overview-route-panel"><span class="section-kicker">当前路由</span><strong>${escapeHtml(mode?.name || '未设置')}</strong><div class="route-line"><span>路由策略</span><b>${escapeHtml(mode?.desc || '请先选择路由模式')}</b></div><div class="route-line"><span>IPv6</span><b class="${state.config?.ipv6_enabled ? 'good' : ''}">${state.config?.ipv6_enabled ? '已启用' : '未启用'}</b></div>${renderOverviewLAN()}<button class="btn btn-ghost overview-route-btn" data-view="routing">更改路由模式</button></section>
       <section class="card traffic-panel"><div class="section-heading"><h2>实时流量</h2><span class="muted">最近 60 秒</span></div><div class="traffic-numbers"><span>上行<strong id="trafficUp">${formatBytes(state.traffic.up)}/s</strong></span><span>下行<strong id="trafficDown">${formatBytes(state.traffic.down)}/s</strong></span></div><div class="traffic-chart" id="trafficChart" role="img" aria-label="最近 60 秒实时流量">${renderTrafficChart()}</div><div class="traffic-chart-label"><span>60 秒前</span><span>现在</span></div></section>
     </div>
     <div class="overview-quick"><button data-view="nodes"><span>可用节点</span><strong>${nodes.length} 个　›</strong></button><button data-view="rules"><span>规则集</span><strong>已启用 ${enabledRules} / ${rules.length}　›</strong></button>${IS_ANDROID ? '' : `<button data-view="capture"><span>流量分析</span><strong>${state.captureStatus?.running ? '分析器运行中' : '分析器已停止'}　›</strong></button>`}</div>
     ${renderConnectionsPanel()}`
+}
+
+// 运行概览里的局域网代理状态：开启时直接显示设备上要填的地址。
+function renderOverviewLAN() {
+  const lan = state.config?.lan_proxy
+  if (!lan?.enabled) return '<div class="route-line"><span>局域网代理</span><b>未开启</b></div>'
+  const port = lan.port || 7890
+  const addrs = state.lanAddresses.length ? state.lanAddresses.map(ip => `${ip}:${port}`) : [`端口 ${port}`]
+  if (lan.username) addrs.push('需用户名密码')
+  return `<div class="route-line"><span>局域网代理</span><b class="good">${addrs.map(escapeHtml).join('<br>')}</b></div>`
 }
 
 // 连接：每个网站命中哪条规则、实际走哪个出口；可输入网站实际测一次走向。
@@ -1706,7 +1716,9 @@ async function refreshConfig() {
     const next = await window.go.app.App.GetConfig()
     if (seq !== configSeq) return // 期间有新的读取或本地写入，这次结果已过期
     const changed = JSON.stringify(state.config) !== JSON.stringify(next)
+    const lanToggled = !!state.config?.lan_proxy?.enabled !== !!next?.lan_proxy?.enabled
     state.config = next
+    if (lanToggled) await refreshLANAddresses() // CLI 等外部改了开关时，地址也跟着更新
     if (changed) backgroundRender()
   } catch (e) {
     showToast('获取配置失败: ' + errorText(e), 'error')
@@ -1987,8 +1999,8 @@ function bindEvents() {
       if (state.view === 'routing') {
         await refreshIPv6Status()
         await refreshDiagnostics()
-        await refreshLANAddresses()
       }
+      if (state.view === 'routing' || state.view === 'overview') await refreshLANAddresses()
       if (state.view === 'capture') await refreshCapture()
       renderApp()
     })

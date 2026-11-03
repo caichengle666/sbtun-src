@@ -603,6 +603,7 @@ h2 { color: var(--text); letter-spacing: 0; }
 .overview-route-panel .section-kicker { margin: 0; }
 .overview-route-panel .route-line { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
 .overview-route-panel .route-line b { color: var(--text); font-weight: 600; text-align: right; }
+.overview-route-panel .route-line > span { flex-shrink: 0; white-space: nowrap; }
 .overview-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 14px; }
 .traffic-panel { display: grid; grid-template-rows: auto auto minmax(54px, 1fr) auto; min-height: 190px; }
 .traffic-panel .section-heading { margin-bottom: 8px; }

@@ -809,3 +809,50 @@ func TestMyRulesOrderAndDirectMode(t *testing.T) {
 		t.Fatalf("direct rules=%v sets=%v", got, sets)
 	}
 }
+
+func TestLANProxyInbound(t *testing.T) {
+	binary := singBoxTestBinary(t)
+	cfg := testConfig(config.RoutingSmart)
+	cfg.LANProxy = &config.LANProxy{Enabled: true, Username: "u", Password: "p"}
+	data, err := BuildConfig(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got RuntimeConfig
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	var lan map[string]any
+	for _, in := range got.Inbounds {
+		if in["tag"] == lanInboundTag {
+			lan = in
+		}
+	}
+	if lan == nil || lan["listen"] != "0.0.0.0" || lan["listen_port"] != float64(config.DefaultLANProxyPort) || lan["users"] == nil {
+		t.Fatalf("lan inbound = %#v", lan)
+	}
+	if !strings.Contains(string(data), `"lan-in"`) || strings.Count(string(data), `"lan-in"`) < 3 {
+		t.Fatalf("lan-in should be sniffed and resolved like tun-in:\n%s", data)
+	}
+	path := filepath.Join(t.TempDir(), "lan.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(binary, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("lan config failed sing-box check: %v\n%s", err, output)
+	}
+
+	cfg.LANProxy = &config.LANProxy{Enabled: true, Port: 9090}
+	if _, err := BuildConfig(cfg, t.TempDir()); err == nil {
+		t.Fatal("reserved port should be rejected")
+	}
+	cfg.LANProxy = &config.LANProxy{Enabled: false, Port: 9090}
+	data, err = BuildConfig(cfg, t.TempDir())
+	if err != nil || strings.Contains(string(data), "lan-in") {
+		t.Fatalf("disabled lan proxy should add nothing: %v", err)
+	}
+	cfg.LANProxy = &config.LANProxy{Enabled: true, Username: "u"}
+	if _, err := BuildConfig(cfg, t.TempDir()); err == nil {
+		t.Fatal("username without password should be rejected")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -332,6 +333,9 @@ func (r *RuntimeCoordinator) writeValidatedConfig(ctx context.Context, cfg confi
 	if built.data, err = r.buildConfig(cfg, built.resolved); err != nil {
 		return builtConfig{}, err
 	}
+	if err := r.prepareLANProxy(cfg); err != nil {
+		return builtConfig{}, err
+	}
 	if err := os.MkdirAll(r.WorkDir, 0o755); err != nil {
 		return builtConfig{}, fmt.Errorf("创建运行目录失败: %w", err)
 	}
@@ -342,6 +346,34 @@ func (r *RuntimeCoordinator) writeValidatedConfig(ctx context.Context, cfg confi
 		return builtConfig{}, err
 	}
 	return built, nil
+}
+
+// prepareLANProxy 在局域网代理开启或换端口时先确认端口没被别的程序占着（否则整个 sing-box 起不来），
+// 并在开关变化时增删 Windows 防火墙放行规则。运行中端口没变时旧进程自己占着端口，不用检查。
+func (r *RuntimeCoordinator) prepareLANProxy(cfg config.Config) error {
+	next := cfg.LANProxyOn()
+	var prev *config.LANProxy
+	if r.activeConfigSet {
+		prev = r.activeConfig.LANProxyOn()
+	}
+	if next == nil {
+		if prev != nil {
+			setLANProxyFirewall(r.Binary, false)
+		}
+		return nil
+	}
+	if prev != nil && prev.ListenPort() == next.ListenPort() {
+		return nil
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", next.ListenPort()))
+	if err != nil {
+		return fmt.Errorf("局域网代理端口 %d 已被其他程序占用，请换一个端口", next.ListenPort())
+	}
+	ln.Close()
+	if prev == nil {
+		setLANProxyFirewall(r.Binary, true)
+	}
+	return nil
 }
 
 func (r *RuntimeCoordinator) resourceDir() string {

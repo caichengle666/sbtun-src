@@ -417,3 +417,64 @@ func runBackupCommand(application *app.App, args []string) error {
 	}
 	return nil
 }
+
+func validateLANArgs(args []string) error {
+	switch {
+	case len(args) == 0, len(args) == 1 && args[0] == "off":
+		return nil
+	case args[0] == "on" && (len(args) == 1 || len(args) == 2 || len(args) == 4):
+		if len(args) > 1 {
+			if port, err := strconv.Atoi(args[1]); err != nil || port < 1 || port > 65535 {
+				return fmt.Errorf("端口无效: %s", args[1])
+			}
+		}
+		return nil
+	}
+	return usageError("lan", args)
+}
+
+// runLANCommand 查看或设置局域网代理；只写端口时保留原来的用户名密码。
+func runLANCommand(application *app.App, args []string) error {
+	if len(args) > 0 {
+		err := app.UpdateConfig(application, func(cfg *config.Config) error {
+			lan := config.LANProxy{}
+			if cfg.LANProxy != nil {
+				lan = *cfg.LANProxy
+			}
+			lan.Enabled = args[0] == "on"
+			if len(args) > 1 {
+				port, _ := strconv.Atoi(args[1])
+				lan.Port = uint16(port)
+			}
+			if len(args) == 4 {
+				lan.Username, lan.Password = args[2], args[3]
+			}
+			cfg.LANProxy = &lan
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	lan := application.GetConfig().LANProxyOn()
+	if lan == nil {
+		fmt.Println("局域网代理: 关闭")
+		return nil
+	}
+	auth := "不需要用户名密码"
+	if lan.Username != "" {
+		auth = "用户名 " + lan.Username
+	}
+	fmt.Printf("局域网代理: 开启（HTTP / SOCKS5，%s）\n", auth)
+	addrs := application.GetLANAddresses()
+	if len(addrs) == 0 {
+		fmt.Printf("没找到本机局域网地址，端口 %d\n", lan.ListenPort())
+	}
+	for _, addr := range addrs {
+		fmt.Printf("  %s:%d\n", addr, lan.ListenPort())
+	}
+	if !application.GetStatus().Running {
+		fmt.Println("提示: sbtun 运行后才能连接")
+	}
+	return nil
+}

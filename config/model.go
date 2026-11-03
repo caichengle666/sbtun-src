@@ -59,6 +59,36 @@ type Config struct {
 	DNSFilterRules []Rule      `json:"dns_filter_rules,omitempty"`
 	// WebDAV 是云端备份设置，只保存在本机，不会写进备份文件。
 	WebDAV *WebDAVSettings `json:"webdav,omitempty"`
+	// LANProxy 是给同一局域网其他设备用的代理端口，nil 表示没开过。
+	LANProxy *LANProxy `json:"lan_proxy,omitempty"`
+}
+
+// DefaultLANProxyPort 是局域网代理没填端口时用的端口。
+const DefaultLANProxyPort = 7890
+
+// LANProxy 在所有网卡上开一个 HTTP 和 SOCKS5 共用的端口，局域网设备填本机 IP 和端口即可
+// 走 sbtun 的节点和分流规则。用户名和密码都留空表示不验证。
+type LANProxy struct {
+	Enabled  bool   `json:"enabled"`
+	Port     uint16 `json:"port,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+// LANProxyOn 返回开启中的局域网代理设置，没开时返回 nil。
+func (c Config) LANProxyOn() *LANProxy {
+	if c.LANProxy == nil || !c.LANProxy.Enabled {
+		return nil
+	}
+	return c.LANProxy
+}
+
+// ListenPort 返回实际监听的端口，没填时用默认端口。
+func (p LANProxy) ListenPort() uint16 {
+	if p.Port == 0 {
+		return DefaultLANProxyPort
+	}
+	return p.Port
 }
 
 // WebDAVSettings 是备份到 WebDAV（坚果云、Nextcloud、Alist、NAS 等）所需的信息。

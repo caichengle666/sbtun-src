@@ -162,6 +162,9 @@ func Validate(cfg Config) error {
 	default:
 		return fmt.Errorf("未知 DNS 模式: %q", cfg.DNSMode)
 	}
+	if p := cfg.LANProxy; p != nil && (p.Username == "") != (p.Password == "") {
+		return fmt.Errorf("局域网代理的用户名和密码要么都填，要么都不填")
+	}
 	subs := make(map[string]struct{}, len(cfg.Subscriptions))
 	for i, sub := range cfg.Subscriptions {
 		if sub.ID == "" || strings.TrimSpace(sub.URL) == "" {

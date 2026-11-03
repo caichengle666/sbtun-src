@@ -126,6 +126,11 @@ textarea.input { resize: vertical; }
 .network-options-title { padding: 14px 0 4px; color: var(--quiet, #64748b); font-size: 11px; letter-spacing: .04em; }
 .setting-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--border, #1b2035); cursor: pointer; }
 .setting-toggle-row:last-child { border-bottom: 0; }
+.lan-proxy-panel { padding: 12px 0 4px; border-bottom: 1px solid var(--border, #1b2035); }
+.lan-proxy-addrs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--muted, #94a3b8); font-size: 12px; }
+.lan-proxy-addrs code { padding: 3px 8px; border-radius: 6px; background: rgba(99, 102, 241, .14); color: var(--text, #e2e8f0); font-size: 13px; user-select: text; }
+.lan-proxy-panel .setting-field .input { flex: 1; max-width: 260px; }
+.lan-proxy-actions { display: flex; justify-content: flex-end; }
 .setting-toggle-copy { display: grid; gap: 4px; min-width: 0; }
 .setting-toggle-copy strong { color: var(--text, #e2e8f0); font-size: 13px; font-weight: 600; }
 .setting-toggle-copy small { color: var(--muted, #94a3b8); font-size: 11px; line-height: 1.45; }

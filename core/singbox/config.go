@@ -95,6 +95,13 @@ func BuildConfigWithAuth(cfg config.Config, exeDir string, auth LocalAuth, resol
 		}
 		inbounds = append(inbounds, upstream)
 	}
+	if lan := cfg.LANProxyOn(); lan != nil {
+		in, err := lanInbound(*lan)
+		if err != nil {
+			return nil, err
+		}
+		inbounds = append(inbounds, in)
+	}
 	clashAPI := map[string]any{"external_controller": "127.0.0.1:9090"}
 	if auth.ClashSecret != "" {
 		clashAPI["secret"] = auth.ClashSecret
@@ -129,6 +136,22 @@ func mobileInbound(auth LocalAuth) map[string]any {
 		in["users"] = []map[string]any{{"username": auth.ProxyUsername, "password": auth.ProxyPassword}}
 	}
 	return in
+}
+
+// lanInboundTag 是局域网代理入站，只听 IPv4（关掉 IPv6 的 Linux 上监听 :: 会失败，局域网设备也都用 IPv4）；它和 tun-in 一样嗅探域名、走同一套分流规则（流量分析除外）。
+const lanInboundTag = "lan-in"
+
+func lanInbound(p config.LANProxy) (map[string]any, error) {
+	port := p.ListenPort()
+	switch port {
+	case 9090, captureProxyPort, captureUpstreamPort, MobileProxyPort:
+		return nil, fmt.Errorf("局域网代理端口 %d 已被 sbtun 内部占用，请换一个", port)
+	}
+	in := map[string]any{"type": "mixed", "tag": lanInboundTag, "listen": "0.0.0.0", "listen_port": port}
+	if p.Username != "" {
+		in["users"] = []map[string]any{{"username": p.Username, "password": p.Password}}
+	}
+	return in, nil
 }
 
 func buildSelector(nodes []config.Node, currentID string) ([]map[string]any, error) {
@@ -220,8 +243,12 @@ func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[s
 	mode, captureEnabled, captureDomains := cfg.RoutingMode, cfg.CaptureEnabled, cfg.CaptureDomains
 	private := map[string]any{"ip_is_private": true, "outbound": "direct"}
 	dns := map[string]any{"protocol": "dns", "action": "hijack-dns"}
+	sniffed := []string{"tun-in"}
+	if cfg.LANProxyOn() != nil {
+		sniffed = append(sniffed, lanInboundTag)
+	}
 	base := []map[string]any{
-		{"inbound": []string{"tun-in"}, "action": "sniff", "timeout": "1s"},
+		{"inbound": sniffed, "action": "sniff", "timeout": "1s"},
 		dns,
 	}
 	if len(shared) > 0 && runtime.GOOS != "android" {
@@ -249,7 +276,7 @@ func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[s
 			}
 		}
 	}
-	base = append(base, map[string]any{"inbound": []string{"tun-in"}, "action": "resolve", "strategy": "prefer_ipv4"})
+	base = append(base, map[string]any{"inbound": sniffed, "action": "resolve", "strategy": "prefer_ipv4"})
 	// 屏蔽规则最先匹配，不会被分流规则抢走。
 	for _, r := range cfg.DNSFilterRules {
 		if rr, ok := customRule(r, nil); ok {

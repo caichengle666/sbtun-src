@@ -106,6 +106,8 @@ const state = {
   captureListScroll: 0,
   captureDetailScroll: 0,
   captureBodyScroll: {},
+  lanAddresses: [],
+  lanDraft: null,
   captureSettingsOpen: localStorage.getItem('sbtun-ui-capture-settings-open') !== 'false',
   view: initialView,
   statusPromise: null,
@@ -726,10 +728,30 @@ function formSettingKeys(protocol) {
   return keys
 }
 
+// 局域网代理：开关一行，开启后在下面显示本机地址和端口、用户名密码设置。
+function renderLANProxy() {
+  const lan = state.config?.lan_proxy || {}
+  const port = lan.port || 7890
+  const row = `<label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>局域网代理</strong><small>让同一局域网的手机、电视等设备把本机当代理（HTTP 和 SOCKS5 共用一个端口），走这里的节点和分流规则</small></span><span class="toggle-switch"><input id="lanProxyToggle" type="checkbox" ${lan.enabled ? 'checked' : ''} ${busyAttr('lan')}><span aria-hidden="true"></span></span></label>`
+  if (!lan.enabled) return row
+  const d = state.lanDraft || { port: String(port), username: lan.username || '', password: lan.password || '' }
+  const addrs = state.lanAddresses.length ? state.lanAddresses.map(ip => `<code>${escapeHtml(ip)}:${port}</code>`).join('') : '<span class="muted">没找到本机局域网地址</span>'
+  const field = (key, label, type, placeholder) => `<label class="setting-field"><span>${label}</span><input class="input" data-lan-field="${key}" type="${type}" value="${escapeHtml(d[key])}" placeholder="${placeholder}" autocomplete="off" /></label>`
+  return `${row}<div class="lan-proxy-panel"><div class="lan-proxy-addrs"><span>设备上填</span>${addrs}</div>${state.running ? '' : '<p class="muted">sbtun 运行后才能连接。</p>'}${lan.username ? '' : '<p class="muted">没设密码时，同一网络里的任何设备都能用这个代理。</p>'}${field('port', '端口', 'text', '7890')}${field('username', '用户名', 'text', '可不填')}${field('password', '密码', 'password', '可不填')}<div class="lan-proxy-actions"><button id="saveLANProxy" class="btn btn-primary" ${busyAttr('lan')}>保存</button></div></div>`
+}
+
+async function refreshLANAddresses() {
+  try {
+    state.lanAddresses = state.config?.lan_proxy?.enabled ? (await window.go.app.App.GetLANAddresses()) || [] : []
+  } catch {
+    state.lanAddresses = []
+  }
+}
+
 function renderRoutingPage() {
   const matchType = RULE_MATCH_TYPES.find(item => item.id === state.customRuleForm.match_type) || RULE_MATCH_TYPES[0]
   const diagnostics = state.diagnostics
-  return `<div class="page-stack"><section class="card"><h2>选择路由模式</h2><div class="mode-grid">${MODES.map(m => `<button class="mode-btn ${state.config?.routing_mode === m.id ? 'active' : ''}" data-mode="${m.id}">${m.name}<span class="mode-desc">${m.desc}</span></button>`).join('')}</div><div class="network-options"><div class="network-options-title">网络选项</div><label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>节点失效自动切换</strong><small>当前节点连续两次测试失败时，切换到延迟最低的可用节点，优先同一订阅</small></span><span class="toggle-switch"><input id="autoSwitchToggle" type="checkbox" ${state.config?.auto_switch_disabled ? '' : 'checked'}><span aria-hidden="true"></span></span></label><label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>启用 IPv6</strong><small>${escapeHtml(state.ipv6Status?.message || '正在检测设备 IPv6')}</small></span><span class="toggle-switch"><input id="ipv6Toggle" type="checkbox" ${state.config?.ipv6_enabled ? 'checked' : ''} ${busyAttr('ipv6')}><span aria-hidden="true"></span></span></label><label class="setting-toggle-row" data-desktop-only><span class="setting-toggle-copy"><strong>启用 WebRTC 防泄漏</strong><small>防止 WebRTC 通过直连暴露真实 IPv4/IPv6</small></span><span class="toggle-switch"><input id="webrtcProtectionToggle" type="checkbox" ${state.config?.webrtc_protection_enabled ? 'checked' : ''} ${busyAttr('webrtc')}><span aria-hidden="true"></span></span></label><label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>启用诊断信息</strong><small>显示当前 selector 和运行节点，仅用于排查问题</small></span><span class="toggle-switch"><input id="diagnosticsToggle" type="checkbox" ${state.config?.diagnostics_enabled ? 'checked' : ''} ${busyAttr('diagnostics')}><span aria-hidden="true"></span></span></label></div></section>${state.config?.diagnostics_enabled ? `<section class="card"><h2>运行诊断</h2><div class="diagnostics-grid"><span>当前配置节点</span><strong>${escapeHtml(diagnostics?.current_node_id || '未选择')}</strong><span>实际 selector</span><strong>${escapeHtml(diagnostics?.selector || '未读取')}</strong><span>状态</span><strong>${escapeHtml(diagnostics?.message || '读取中')}</strong></div></section>` : ''}
+  return `<div class="page-stack"><section class="card"><h2>选择路由模式</h2><div class="mode-grid">${MODES.map(m => `<button class="mode-btn ${state.config?.routing_mode === m.id ? 'active' : ''}" data-mode="${m.id}">${m.name}<span class="mode-desc">${m.desc}</span></button>`).join('')}</div><div class="network-options"><div class="network-options-title">网络选项</div><label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>节点失效自动切换</strong><small>当前节点连续两次测试失败时，切换到延迟最低的可用节点，优先同一订阅</small></span><span class="toggle-switch"><input id="autoSwitchToggle" type="checkbox" ${state.config?.auto_switch_disabled ? '' : 'checked'}><span aria-hidden="true"></span></span></label><label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>启用 IPv6</strong><small>${escapeHtml(state.ipv6Status?.message || '正在检测设备 IPv6')}</small></span><span class="toggle-switch"><input id="ipv6Toggle" type="checkbox" ${state.config?.ipv6_enabled ? 'checked' : ''} ${busyAttr('ipv6')}><span aria-hidden="true"></span></span></label><label class="setting-toggle-row" data-desktop-only><span class="setting-toggle-copy"><strong>启用 WebRTC 防泄漏</strong><small>防止 WebRTC 通过直连暴露真实 IPv4/IPv6</small></span><span class="toggle-switch"><input id="webrtcProtectionToggle" type="checkbox" ${state.config?.webrtc_protection_enabled ? 'checked' : ''} ${busyAttr('webrtc')}><span aria-hidden="true"></span></span></label>${renderLANProxy()}<label class="setting-toggle-row"><span class="setting-toggle-copy"><strong>启用诊断信息</strong><small>显示当前 selector 和运行节点，仅用于排查问题</small></span><span class="toggle-switch"><input id="diagnosticsToggle" type="checkbox" ${state.config?.diagnostics_enabled ? 'checked' : ''} ${busyAttr('diagnostics')}><span aria-hidden="true"></span></span></label></div></section>${state.config?.diagnostics_enabled ? `<section class="card"><h2>运行诊断</h2><div class="diagnostics-grid"><span>当前配置节点</span><strong>${escapeHtml(diagnostics?.current_node_id || '未选择')}</strong><span>实际 selector</span><strong>${escapeHtml(diagnostics?.selector || '未读取')}</strong><span>状态</span><strong>${escapeHtml(diagnostics?.message || '读取中')}</strong></div></section>` : ''}
     ${renderNodeGroupsCard()}
     ${`<section class="card"><div class="section-heading"><div><h2>我的分流规则</h2><p class="muted">${state.config?.routing_mode === 'direct' ? '全局直连模式下只有去向为“阻断”的规则生效。' : '优先于路由模式生效；规则集在“分流规则”页添加，也可以选去向。'}</p></div></div><div id="customRulesPanel">${renderCustomRules()}</div><div class="rule-editor ${state.customRuleForm.action === 'node' ? 'with-node' : ''}"><label class="rule-field"><span>匹配对象</span><select id="ruleMatchType" class="select">${RULE_MATCH_TYPES.map(item => `<option value="${item.id}" ${item.id === matchType.id ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="rule-field"><span>匹配内容</span><input id="ruleValue" class="input" value="${escapeHtml(state.customRuleForm.value)}" placeholder="${matchType.placeholder}" /></label><label class="rule-field"><span>去向</span>${renderRuleActionSelect()}</label>${state.customRuleForm.action === 'node' ? renderRuleNodeSelect() : ''}<button id="addRuleBtn" class="btn btn-primary" ${busyAttr('customRule')}>${state.editingCustomRule ? '保存修改' : '添加规则'}</button>${state.editingCustomRule ? '<button id="cancelEditRule" class="btn btn-ghost">取消</button>' : ''}<small class="rule-hint value-hint" id="ruleValueHint">${matchType.hint}</small><small class="rule-hint action-hint" id="ruleActionHint">${escapeHtml(ruleActionHint(state.customRuleForm.action))}</small></div><details class="rule-import" open><summary>批量导入规则</summary><div class="rule-import-body"><textarea id="ruleImport" class="input" rows="3" placeholder="粘贴规则或填链接：Clash/Surge 配置、ACL4SSR 模板都行；引用的 RULE-SET 列表会各自变成一个规则集"></textarea><button id="importRuleBtn" class="btn btn-ghost" ${busyAttr('importRule')}>导入</button></div></details></section>`}
   </div>`
@@ -1965,6 +1987,7 @@ function bindEvents() {
       if (state.view === 'routing') {
         await refreshIPv6Status()
         await refreshDiagnostics()
+        await refreshLANAddresses()
       }
       if (state.view === 'capture') await refreshCapture()
       renderApp()
@@ -2229,6 +2252,35 @@ function bindEvents() {
       showToast(enabled ? 'WebRTC 防泄漏已启用' : 'WebRTC 防泄漏已关闭', 'success')
     }, webrtcProtectionToggle)
   })
+
+  const lanProxyToggle = document.querySelector('#lanProxyToggle')
+  if (lanProxyToggle) lanProxyToggle.addEventListener('change', () => {
+    const enabled = lanProxyToggle.checked
+    runOnce('lan', async () => {
+      await updateConfig(cfg => { cfg.lan_proxy = { ...(cfg.lan_proxy || {}), enabled } })
+      state.lanDraft = null
+      await refreshLANAddresses()
+      showToast(enabled ? '局域网代理已开启' : '局域网代理已关闭', 'success')
+    }, lanProxyToggle)
+  })
+  document.querySelectorAll('[data-lan-field]').forEach(input => input.addEventListener('input', () => {
+    const lan = state.config?.lan_proxy || {}
+    state.lanDraft = state.lanDraft || { port: String(lan.port || 7890), username: lan.username || '', password: lan.password || '' }
+    state.lanDraft[input.dataset.lanField] = input.value
+  }))
+  const saveLANProxy = document.querySelector('#saveLANProxy')
+  if (saveLANProxy) saveLANProxy.addEventListener('click', () => runOnce('lan', async () => {
+    const d = state.lanDraft
+    if (!d) return showToast('设置没有变化', 'success')
+    const port = Number(d.port.trim() || 7890)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口要是 1 到 65535 之间的数字')
+    const username = d.username.trim()
+    if (Boolean(username) !== Boolean(d.password)) throw new Error('用户名和密码要么都填，要么都不填')
+    await updateConfig(cfg => { cfg.lan_proxy = { enabled: true, port, username, password: d.password } })
+    state.lanDraft = null
+    await refreshLANAddresses()
+    showToast('局域网代理设置已应用', 'success')
+  }, saveLANProxy))
 
   const captureDomains = document.querySelector('#captureDomains')
   const captureSettings = document.querySelector('#captureSettings')
@@ -2941,6 +2993,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (window.go?.app?.App) {
     // 各项读取函数自己处理错误，并行发出
     await Promise.all([refreshStatus(), refreshConfig(), refreshSingBoxVersion(), refreshIPv6Status(), refreshRules(), IS_ANDROID || refreshCapture()])
+    await refreshLANAddresses()
     await refreshDiagnostics() // 依赖配置里的诊断开关
     backgroundRender()
     poll(refreshStatus, 2000)

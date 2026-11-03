@@ -133,6 +133,9 @@ func main() {
 			autoSwitch = "关闭"
 		}
 		fmt.Printf("自动切换: %s\nIPv6: %s\nWebRTC 防泄漏: %s\n诊断信息: %s\n", autoSwitch, onOff(cfg.IPv6Enabled), onOff(cfg.WebRTCProtectionEnabled), onOff(cfg.DiagnosticsEnabled))
+		if lan := cfg.LANProxyOn(); lan != nil {
+			fmt.Printf("局域网代理: 端口 %d\n", lan.ListenPort())
+		}
 		if cfg.WebDAV != nil {
 			fmt.Printf("WebDAV 备份: %s（自动备份%s）\n", cfg.WebDAV.URL, onOff(cfg.WebDAV.AutoBackup))
 		}
@@ -187,6 +190,8 @@ func main() {
 		err = runSetCommand(application, commandArgs)
 	case "backup":
 		err = runBackupCommand(application, commandArgs)
+	case "lan":
+		err = runLANCommand(application, commandArgs)
 	case "diag":
 		err = runDiagCommand(application)
 	case "info":
@@ -337,6 +342,8 @@ func cliUsage(command string, args []string) string {
 		return "sbtun capture <run|enable|disable|status|list|show|clear|cert>"
 	case "kernel":
 		return "sbtun kernel <version|update>"
+	case "lan":
+		return "sbtun lan [on [端口] [用户名 密码]|off]"
 	case "backup":
 		return "sbtun backup [list|restore <编号>|delete <编号>|set <WebDAV地址> <用户名> <密码> [加密密码]|auto <on|off>|clear]"
 	}
@@ -493,6 +500,8 @@ func validateCLIArgs(command string, args []string) error {
 		return validateKernelArgs(args)
 	case "backup":
 		return validateBackupArgs(args)
+	case "lan":
+		return validateLANArgs(args)
 	default:
 		return fmt.Errorf("未知命令: %s", command)
 	}
@@ -563,6 +572,8 @@ func requiresElevation(command string, args []string) bool {
 	switch command {
 	case "run", "start", "stop", "route", "auto-switch", "add-node", "add-rule", "switch", "del", "delete", "edit", "set", "upgrade":
 		return true
+	case "lan":
+		return len(args) > 0
 	case "custom", "filter", "groups":
 		return len(args) > 0 && (args[0] == "add" || args[0] == "edit" || args[0] == "delete")
 	case "rules":
@@ -629,6 +640,9 @@ func printHelp() {
 		{"set webrtc <on|off>", "开启或关闭 WebRTC 防泄漏"},
 		{"set diagnostics <on|off>", "开启或关闭诊断信息"},
 		{"diag", "查看运行诊断（需先开启诊断信息）"},
+		{"lan", "查看局域网代理状态和本机地址"},
+		{"lan on [端口] [用户名 密码]", "开启局域网代理（HTTP 和 SOCKS5 共用端口，默认 7890），用户名密码可不填"},
+		{"lan off", "关闭局域网代理"},
 		{"add-rule <链接|文件|文本>", "批量导入分流规则；引用的 RULE-SET 列表各自成为规则集"},
 		{"custom", "列出分流规则"},
 		{"custom add <类型> <内容> <去向>", "添加分流规则，类型 domain_suffix/domain_keyword/domain/ip_cidr/port；去向 proxy/direct/block，或节点组名、节点名、订阅名、协议(hy2)、地区(美国/US)"},

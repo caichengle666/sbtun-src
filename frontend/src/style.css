@@ -973,15 +973,15 @@ h2 { color: var(--text); letter-spacing: 0; }
 .conn-close:hover { background: var(--raised); color: var(--red); }
 .conn-empty { padding: 18px 0; color: var(--quiet); font-size: 12px; }
 /* 桌面宽度下侧边栏固定在窗口里，不随内容滚走（底部的更新按钮也一直能点到） */
-/* 宽窗口下 TUN 开关做成侧边栏顶部 sbtun 旁边的拨动开关，随时点得到；窄窗口侧边栏只剩图标放不下，仍用顶栏的按钮 */
-.brand-power { display: none; margin-left: auto; padding: 0; border: 0; background: none; cursor: pointer; }
-.brand-power.on > span { background: var(--accent, #0ea5e9); }
-.brand-power.on > span::after { transform: translateX(18px); }
-.brand-power:disabled { opacity: .5; cursor: progress; }
-@media (min-width: 1001px) {
-  .brand-power { display: inline-flex; }
-  .topbar-actions #power { display: none; }
-}
+/* 桌面上 sbtun 标志本身就是 TUN 开关：运行时彩色，停止时变灰，点一下切换；侧边栏固定，随时点得到 */
+.brand-power { width: 100%; margin: 0 0 18px; padding-top: 6px; padding-bottom: 6px; border: 0; border-radius: 10px; background: none; font: inherit; font-size: 18px; font-weight: 700; text-align: left; cursor: pointer; transition: background .15s ease; }
+.brand-power:hover { background: rgba(148, 163, 184, .12); }
+.brand-power .brand-mark, .brand-power .brand-name { transition: filter .2s ease, opacity .2s ease, color .2s ease; }
+.brand-power:not(.on) .brand-mark { filter: grayscale(1); opacity: .45; }
+.brand-power:not(.on) .brand-name { color: var(--muted, #94a3b8); }
+.brand-power.on .brand-name { color: var(--accent, #22d3ee); }
+.brand-power:disabled { cursor: progress; opacity: .6; }
+@media (min-width: 761px) { .topbar-actions #power { display: none; } }
 @media (min-width: 761px) {
   .sidebar { position: sticky; top: var(--titlebar-h); align-self: flex-start; height: calc(100vh - var(--titlebar-h)); overflow-y: auto; }
 }

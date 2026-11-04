@@ -325,13 +325,12 @@ function render() {
   return `
     <main class="shell view-${state.view}">
       <aside class="sidebar">
-        <div class="brand"><img class="brand-mark" src="${logoUrl}" alt="" /><span class="brand-name">sbtun</span></div>
+        <div class="brand"><img class="brand-mark" src="${logoUrl}" alt="" /><span class="brand-name">sbtun</span>${IS_ANDROID ? '' : `<button data-power type="button" role="switch" class="toggle-switch brand-power ${state.running ? 'on' : ''}" aria-checked="${state.running}" title="${powerLabel()}" aria-label="${powerLabel()}" ${busyAttr('power')}><span aria-hidden="true"></span></button>`}</div>
         <div class="nav-caption">工作区</div>
         <nav class="nav-list">
           ${VIEWS.map(id => [id, viewLabel(id)]).map(([id, label]) => `<button class="nav-item ${state.view === id ? 'active' : ''}" data-view="${id}" title="${label}"><span class="nav-icon" aria-hidden="true">${NAV_ICONS[id]}</span><span class="nav-label">${label}</span></button>`).join('')}
         </nav>
         <div class="sidebar-status">
-          ${IS_ANDROID ? '' : `<button data-power class="switch sidebar-power ${state.running ? 'on' : ''}" ${busyAttr('power')}>${powerLabel()}</button>`}
           <div class="sidebar-status-line" title="${escapeHtml(statusLabel(state.statusState, state.statusMessage))}"><span class="dot ${dotClass(state.statusState)}"></span><span>${escapeHtml(statusLabel(state.statusState, state.statusMessage))}</span></div>
           <div class="sidebar-versions">
             ${state.version ? `<span class="app-version" title="管理器版本 v${escapeHtml(state.version)}">程序 v${escapeHtml(state.version)}</span>` : ''}
@@ -1703,8 +1702,9 @@ function updateStatusView() {
   if (trafficDown) trafficDown.textContent = formatBytes(state.traffic.down) + '/s'
   const trafficChart = document.querySelector('#trafficChart')
   if (trafficChart) trafficChart.innerHTML = renderTrafficChart()
-  document.querySelectorAll('.switch[data-power]').forEach(btn => {
-    btn.textContent = powerLabel()
+  document.querySelectorAll('.switch[data-power], .brand-power').forEach(btn => {
+    if (btn.id === 'power') btn.textContent = powerLabel()
+    else { btn.title = powerLabel(); btn.setAttribute('aria-label', powerLabel()); btn.setAttribute('aria-checked', String(state.running)) }
     btn.classList.toggle('on', state.running)
     btn.disabled = state.busy.has('power')
   })

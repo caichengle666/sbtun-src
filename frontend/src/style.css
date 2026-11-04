@@ -973,10 +973,13 @@ h2 { color: var(--text); letter-spacing: 0; }
 .conn-close:hover { background: var(--raised); color: var(--red); }
 .conn-empty { padding: 18px 0; color: var(--quiet); font-size: 12px; }
 /* 桌面宽度下侧边栏固定在窗口里，不随内容滚走（底部的更新按钮也一直能点到） */
-/* 宽窗口下 TUN 开关放在固定的侧边栏里，随时点得到；窄窗口侧边栏放不下，仍用顶栏的 */
-.sidebar-power { display: none; }
+/* 宽窗口下 TUN 开关做成侧边栏顶部 sbtun 旁边的拨动开关，随时点得到；窄窗口侧边栏只剩图标放不下，仍用顶栏的按钮 */
+.brand-power { display: none; margin-left: auto; padding: 0; border: 0; background: none; cursor: pointer; }
+.brand-power.on > span { background: var(--accent, #0ea5e9); }
+.brand-power.on > span::after { transform: translateX(18px); }
+.brand-power:disabled { opacity: .5; cursor: progress; }
 @media (min-width: 1001px) {
-  .sidebar-power { display: block; width: 100%; margin-bottom: 6px; }
+  .brand-power { display: inline-flex; }
   .topbar-actions #power { display: none; }
 }
 @media (min-width: 761px) {

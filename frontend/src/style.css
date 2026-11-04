@@ -972,7 +972,6 @@ h2 { color: var(--text); letter-spacing: 0; }
 .conn-close { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--quiet); font-size: 15px; line-height: 1; cursor: pointer; }
 .conn-close:hover { background: var(--raised); color: var(--red); }
 .conn-empty { padding: 18px 0; color: var(--quiet); font-size: 12px; }
-/* 桌面宽度下侧边栏固定在窗口里，不随内容滚走（底部的更新按钮也一直能点到） */
 /* 桌面上 sbtun 标志本身就是 TUN 开关：运行时彩色，停止时变灰，点一下切换；侧边栏固定，随时点得到 */
 .brand-power { width: 100%; margin: 0 0 18px; padding-top: 6px; padding-bottom: 6px; border: 0; border-radius: 10px; background: none; font: inherit; font-size: 18px; font-weight: 700; text-align: left; cursor: pointer; transition: background .15s ease; }
 .brand-power:hover { background: rgba(148, 163, 184, .12); }
@@ -981,7 +980,7 @@ h2 { color: var(--text); letter-spacing: 0; }
 .brand-power:not(.on) .brand-name { color: var(--muted, #94a3b8); }
 .brand-power.on .brand-name { color: var(--accent, #22d3ee); }
 .brand-power:disabled { cursor: progress; opacity: .6; }
-@media (min-width: 761px) { .topbar-actions #power { display: none; } }
+/* 桌面宽度下侧边栏固定在窗口里，不随内容滚走（底部的更新按钮也一直能点到） */
 @media (min-width: 761px) {
   .sidebar { position: sticky; top: var(--titlebar-h); align-self: flex-start; height: calc(100vh - var(--titlebar-h)); overflow-y: auto; }
 }

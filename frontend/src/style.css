@@ -827,7 +827,9 @@ h2 { color: var(--text); letter-spacing: 0; }
 :root[data-theme="glass"] body { background: transparent; }
 /* 毛玻璃：渐变铺满整个窗口，改由 body 滚动，滚动条轨道透明、后面是同一层渐变，不再露出一条黑边 */
 :root[data-theme="glass"]:not([data-platform="android"]) { height: 100%; overflow: hidden; }
-:root[data-theme="glass"]:not([data-platform="android"]) body { box-sizing: border-box; height: 100%; min-height: 0; overflow-y: auto; }
+:root[data-theme="glass"]:not([data-platform="android"]) body { box-sizing: border-box; height: 100%; min-height: 0; overflow-y: auto; padding-top: 0; }
+/* body 自己滚动时，标题栏的留白放到 .shell 上：sticky 的侧边栏按滚动容器的内边距算位置，留白放在 body 上会多空出一条缝 */
+:root[data-theme="glass"]:not([data-platform="android"]) .shell { margin-top: var(--titlebar-h); }
 :root[data-theme="glass"] {
   background:
     radial-gradient(circle at 12% 18%, rgba(59, 130, 246, .55), transparent 42%),

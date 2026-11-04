@@ -970,3 +970,7 @@ h2 { color: var(--text); letter-spacing: 0; }
 .conn-close { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--quiet); font-size: 15px; line-height: 1; cursor: pointer; }
 .conn-close:hover { background: var(--raised); color: var(--red); }
 .conn-empty { padding: 18px 0; color: var(--quiet); font-size: 12px; }
+/* 桌面宽度下侧边栏固定在窗口里，不随内容滚走（底部的更新按钮也一直能点到） */
+@media (min-width: 761px) {
+  .sidebar { position: sticky; top: var(--titlebar-h); align-self: flex-start; height: calc(100vh - var(--titlebar-h)); overflow-y: auto; }
+}

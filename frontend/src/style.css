@@ -973,6 +973,12 @@ h2 { color: var(--text); letter-spacing: 0; }
 .conn-close:hover { background: var(--raised); color: var(--red); }
 .conn-empty { padding: 18px 0; color: var(--quiet); font-size: 12px; }
 /* 桌面宽度下侧边栏固定在窗口里，不随内容滚走（底部的更新按钮也一直能点到） */
+/* 宽窗口下 TUN 开关放在固定的侧边栏里，随时点得到；窄窗口侧边栏放不下，仍用顶栏的 */
+.sidebar-power { display: none; }
+@media (min-width: 1001px) {
+  .sidebar-power { display: block; width: 100%; margin-bottom: 6px; }
+  .topbar-actions #power { display: none; }
+}
 @media (min-width: 761px) {
   .sidebar { position: sticky; top: var(--titlebar-h); align-self: flex-start; height: calc(100vh - var(--titlebar-h)); overflow-y: auto; }
 }

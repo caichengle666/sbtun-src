@@ -331,6 +331,7 @@ function render() {
           ${VIEWS.map(id => [id, viewLabel(id)]).map(([id, label]) => `<button class="nav-item ${state.view === id ? 'active' : ''}" data-view="${id}" title="${label}"><span class="nav-icon" aria-hidden="true">${NAV_ICONS[id]}</span><span class="nav-label">${label}</span></button>`).join('')}
         </nav>
         <div class="sidebar-status">
+          ${IS_ANDROID ? '' : `<button data-power class="switch sidebar-power ${state.running ? 'on' : ''}" ${busyAttr('power')}>${powerLabel()}</button>`}
           <div class="sidebar-status-line" title="${escapeHtml(statusLabel(state.statusState, state.statusMessage))}"><span class="dot ${dotClass(state.statusState)}"></span><span>${escapeHtml(statusLabel(state.statusState, state.statusMessage))}</span></div>
           <div class="sidebar-versions">
             ${state.version ? `<span class="app-version" title="管理器版本 v${escapeHtml(state.version)}">程序 v${escapeHtml(state.version)}</span>` : ''}
@@ -1702,9 +1703,11 @@ function updateStatusView() {
   if (trafficDown) trafficDown.textContent = formatBytes(state.traffic.down) + '/s'
   const trafficChart = document.querySelector('#trafficChart')
   if (trafficChart) trafficChart.innerHTML = renderTrafficChart()
-  power.textContent = powerLabel()
-  power.className = 'switch ' + (state.running ? 'on' : '')
-  power.disabled = state.busy.has('power')
+  document.querySelectorAll('.switch[data-power]').forEach(btn => {
+    btn.textContent = powerLabel()
+    btn.classList.toggle('on', state.running)
+    btn.disabled = state.busy.has('power')
+  })
   updateMobileHero()
   dot.className = 'dot ' + dotClass(state.statusState)
 }

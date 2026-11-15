@@ -493,8 +493,21 @@ func (a *App) startWithConfigLocked(cfg config.Config) error {
 	if !ok {
 		return errors.New("尚未选择节点")
 	}
+	// 先清掉上次异常退出的残留（macOS 系统 DNS 还指着 TUN、孤儿 sing-box），否则测速必然失败、
+	// 永远走不到 runtime.Start 里的恢复。runtime 在运行时 RecoverStale 什么也不做。
+	recoverErr := a.runtime.RecoverStale()
 	health := a.testNode(a.ctx, node)
+	if !health.Healthy && a.mayProbeDNS(a.ctx) {
+		// 缓存的引导 DNS 可能是在别的网络里选的（笔记本换了网络），重新探测；换了服务器就再测一次。
+		before := a.bootstrapDNS()
+		if after, err := a.refreshBootstrapDNS(a.ctx, true); err == nil && after != before {
+			health = a.testNode(a.ctx, node)
+		}
+	}
 	if !health.Healthy {
+		if recoverErr != nil {
+			return fmt.Errorf("节点不可用: %s（清理上次异常退出的残留失败: %v）", health.Message, recoverErr)
+		}
 		return fmt.Errorf("节点不可用: %s", health.Message)
 	}
 	if err := a.runtime.Start(a.ctx, cfg); err != nil {
@@ -620,7 +633,7 @@ func (a *App) testNodeWithExit(cfg config.Config, id string) NodeHealthDTO {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			result.ExitIP, result.Country = detectExit(ctx, a.binary, node)
+			result.ExitIP, result.Country = detectExit(ctx, a.binary, node, a.bootstrapDNS())
 		}
 		return result
 	}
@@ -634,7 +647,15 @@ func (a *App) testNode(ctx context.Context, node config.Node) NodeHealthDTO {
 	if _, err := currentSelectorContext(ctx); err == nil {
 		return testNodeOnRunningInstance(ctx, node)
 	}
-	return testNodeWithBinary(ctx, node, a.binary)
+	// 没有 TUN 在跑：临时 sing-box 用探测选出的引导 DNS 解析节点域名（不用系统 DNS，它可能是坏的）。
+	dns := a.bootstrapDNS()
+	if a.runtime != nil && a.runtime.DNS != nil && a.runtime.mayProbeDNS() {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dns, _ = a.runtime.DNS.Refresh(ctx)
+	}
+	return testNodeWithBinary(ctx, node, a.binary, dns)
 }
 
 func currentNode(cfg config.Config) (config.Node, bool) {

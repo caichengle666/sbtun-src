@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/caichengle666/sbtun/config"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 )
 
 // 内核秒退时测速应立即报错，而不是等满超时。
@@ -21,7 +22,7 @@ func TestNodeProxyDetectsImmediateExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := config.Node{ID: "n1", Name: "n1", Protocol: "socks", Server: "127.0.0.1", Port: 1080}
-	proxy, err := startNodeProxy(context.Background(), binary, node, time.Second)
+	proxy, err := startNodeProxy(context.Background(), binary, node, time.Second, dnsprobe.Server{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/caichengle666/sbtun/config"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 	"github.com/caichengle666/sbtun/core/rules"
 )
 
@@ -34,11 +36,17 @@ const (
 	captureUpstreamPort = 9082
 )
 
+// BuildOptions 是生成配置时用到的、不在用户配置里的运行环境信息。
+type BuildOptions struct {
+	// BootstrapDNS 是 dns-local 用的服务器（由 dnsprobe 探测选出）；零值或不合法时用 dnsprobe.Fallback()。
+	BootstrapDNS dnsprobe.Server
+}
+
 // BuildConfigWithAuth 将用户配置转换为 sing-box 运行配置，并用本地凭据保护
 // clash API 和抓包代理端口。resolved 是节点域名（小写）当前解析出的地址。
 // 三种模式只决定内置的国内直连规则集开不开、匹配不到时走代理还是直连；
 // 自己的规则（分流规则、规则集）在智能和全局下优先生效，直连模式下只保留屏蔽类。
-func BuildConfigWithAuth(cfg config.Config, exeDir string, auth LocalAuth, resolved map[string][]netip.Addr) ([]byte, error) {
+func BuildConfigWithAuth(cfg config.Config, exeDir string, auth LocalAuth, resolved map[string][]netip.Addr, opts BuildOptions) ([]byte, error) {
 	if err := config.Validate(cfg); err != nil {
 		return nil, err
 	}
@@ -109,7 +117,7 @@ func BuildConfigWithAuth(cfg config.Config, exeDir string, auth LocalAuth, resol
 	result := RuntimeConfig{
 		Schema:    "https://sing-box.sagernet.org/schema.json",
 		Log:       map[string]any{"level": "info", "timestamp": true},
-		DNS:       buildDNS(cfg.DNSMode, cfg.RoutingMode, NodeDomains(cfg.Nodes), hasRuleSet(ruleSets, "geosite-cn")),
+		DNS:       buildDNS(cfg.DNSMode, cfg.RoutingMode, NodeDomains(cfg.Nodes), directRuleDomains(cfg), hasRuleSet(ruleSets, "geosite-cn"), opts.BootstrapDNS),
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
 		Endpoints: endpoints,
@@ -140,6 +148,94 @@ func mobileInbound(auth LocalAuth) map[string]any {
 
 // lanInboundTag 是局域网代理入站，只听 IPv4（关掉 IPv6 的 Linux 上监听 :: 会失败，局域网设备也都用 IPv4）；它和 tun-in 一样嗅探域名、走同一套分流规则（流量分析除外）。
 const lanInboundTag = "lan-in"
+
+// lanAllowedSources 是允许使用局域网代理的来源网段：RFC 1918 私有地址、运营商级 NAT / Tailscale 用的
+// 100.64.0.0/10、链路本地和本机。其他来源（公网地址）一律拒绝。
+var lanAllowedSources = []string{
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8",
+	"fc00::/7", "fe80::/10", "::1/128",
+}
+
+// lanRejectPublicSource 拒绝来源不在 lanAllowedSources 里的 lan-in 连接。
+// sing-box 的 source_ip_is_private 只能写 true，写 false 等于没写，所以用“与”逻辑规则加 invert。
+func lanRejectPublicSource() map[string]any {
+	return map[string]any{
+		"type": "logical", "mode": "and",
+		"rules": []map[string]any{
+			{"inbound": []string{lanInboundTag}},
+			{"source_ip_cidr": lanAllowedSources, "invert": true},
+		},
+		"action": "reject",
+	}
+}
+
+// lanDeniedBase 是局域网代理永远不能访问的目标：回环、链路本地和“本网络”地址。
+var lanDeniedBase = []string{"127.0.0.0/8", "::1/128", "169.254.0.0/16", "fe80::/10", "0.0.0.0/8", "::/128"}
+
+// localInterfaceAddrs 列出本机网卡地址，测试时替换。
+var localInterfaceAddrs = func() []netip.Addr {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	for _, iface := range interfaces {
+		if iface.Name == tun.InterfaceName {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			var ip net.IP
+			switch value := address.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if addr, ok := netip.AddrFromSlice(ip); ok {
+				out = append(out, addr.Unmap())
+			}
+		}
+	}
+	return out
+}
+
+// tunOwnIPv6 是 sbtun TUN 网卡的 IPv6 网段。
+var tunOwnIPv6 = netip.MustParsePrefix("fdfe:dcba:9876::/48")
+
+// lanDeniedDestinations 返回局域网代理要拒绝的目标网段：固定的回环/链路本地，加上本机各网卡自己的地址。
+func lanDeniedDestinations() []string {
+	out := append([]string(nil), lanDeniedBase...)
+	seen := make(map[netip.Addr]bool)
+	var own []string
+	for _, addr := range localInterfaceAddrs() {
+		addr = addr.Unmap().WithZone("")
+		if !addr.IsValid() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() || seen[addr] {
+			continue
+		}
+		if isTUNOwnAddr(addr) {
+			continue
+		}
+		seen[addr] = true
+		own = append(own, netip.PrefixFrom(addr, addr.BitLen()).String())
+	}
+	sort.Strings(own)
+	return append(out, own...)
+}
+
+// isTUNOwnAddr 报告地址是不是 sbtun 自己 TUN 网卡可能用的地址。它们在 TUN 运行前后时有时无，
+// 写进配置会让运行中重新生成的配置和启动时的不一致，导致无谓的重启；而且发往它们的流量本来就进不了 lan-in 的目标。
+func isTUNOwnAddr(addr netip.Addr) bool {
+	if addr.Is6() {
+		return tunOwnIPv6.Contains(addr)
+	}
+	// 只排除 sbtun 实际会用的 172.18–172.31.0.0/30，172.16/12 里其他的地址是真实的内网地址。
+	b := addr.As4()
+	return b[0] == 172 && b[1] >= 18 && b[1] <= 31 && b[2] == 0 && b[3] < 4
+}
 
 func lanInbound(p config.LANProxy) (map[string]any, error) {
 	port := p.ListenPort()
@@ -204,15 +300,36 @@ func hasRuleSet(sets []configuredRuleSet, id string) bool {
 	return false
 }
 
+// localDNSTag 是引导 DNS 的标签：节点域名、直连出站、全局 resolve 都靠它，它本身只用 IP，不依赖任何解析。
+const localDNSTag = "dns-local"
+
+// bootstrapDNSServer 把探测选出的引导 DNS 写成 sing-box 的 DNS server。服务器地址都是 IP，
+// 不需要 domain_resolver；不写 detour，按路由默认（直连、绑定物理网卡）发出。
+func bootstrapDNSServer(server dnsprobe.Server) map[string]any {
+	if server.Validate() != nil {
+		server = dnsprobe.Fallback()
+	}
+	out := map[string]any{"type": server.Type, "tag": localDNSTag, "server": server.Addr().String(), "server_port": server.Port}
+	switch server.Type {
+	case dnsprobe.TypeHTTPS:
+		out["path"] = server.Path
+		out["tls"] = map[string]any{"enabled": true, "server_name": server.ServerName}
+	case dnsprobe.TypeTLS:
+		out["tls"] = map[string]any{"enabled": true, "server_name": server.ServerName}
+	}
+	return out
+}
+
 // buildDNS 生成 DNS 配置。geositeCN 表示 route 里确实有 geosite-cn 规则集（启用且文件存在），
 // 否则 DNS 规则不能引用它，sing-box 会报 rule-set not found 拒绝整份配置。
-func buildDNS(mode config.DNSMode, routeMode config.RoutingMode, nodeDomains []string, geositeCN bool) map[string]any {
+// dns-remote 用 IP 访问 Cloudflare DoH，经当前节点发出，不依赖 dns-local。
+// direct 是“直连”分流规则里的域名：它们本来就直连，解析也用 dns-local，当前节点挂了也照样能用。
+func buildDNS(mode config.DNSMode, routeMode config.RoutingMode, nodeDomains []string, direct map[string][]string, geositeCN bool, bootstrap dnsprobe.Server) map[string]any {
 	servers := []map[string]any{
-		{"type": "udp", "tag": "dns-local", "server": "223.5.5.5", "server_port": 53, "detour": "direct"},
-		{"type": "udp", "tag": "dns-local-standby", "server": "119.29.29.29", "server_port": 53, "detour": "direct"},
+		bootstrapDNSServer(bootstrap),
 		{
-			"type": "https", "tag": "dns-remote", "server": "cloudflare-dns.com", "server_port": 443,
-			"path": "/dns-query", "domain_resolver": "dns-local", "detour": "proxy",
+			"type": "https", "tag": "dns-remote", "server": "1.1.1.1", "server_port": 443,
+			"path": "/dns-query", "detour": "proxy",
 			"tls": map[string]any{"enabled": true, "server_name": "cloudflare-dns.com"},
 		},
 	}
@@ -220,22 +337,60 @@ func buildDNS(mode config.DNSMode, routeMode config.RoutingMode, nodeDomains []s
 	if mode == config.DNSSystem || routeMode == config.RoutingDirect {
 		final = "dns-local"
 	}
+	if mode == config.DNSCustom {
+		final = "dns-remote"
+	}
 	rules := []map[string]any{}
 	// Node domains always resolve locally: tests must not depend on the
 	// current node, which may be the one that is down.
 	if len(nodeDomains) > 0 {
 		rules = append(rules, map[string]any{"domain": nodeDomains, "server": "dns-local"})
 	}
-	if mode == config.DNSAuto && routeMode == config.RoutingSmart {
-		if geositeCN {
-			rules = append(rules, map[string]any{"rule_set": []string{"geosite-cn"}, "server": "dns-local"})
+	if final != localDNSTag && mode != config.DNSSystem && len(direct) > 0 {
+		rule := map[string]any{"server": localDNSTag}
+		for key, values := range direct {
+			rule[key] = values
 		}
-		rules = append(rules, map[string]any{"ip_is_private": true, "server": "dns-local"})
+		rules = append(rules, rule)
 	}
-	if mode == config.DNSCustom {
-		final = "dns-remote"
+	// 旧版写法还有一条 {"ip_is_private": true}：那是 1.14 弃用、1.16 移除的“地址过滤”字段，
+	// 会让每个外网域名先明文问一遍 dns-local 再决定用哪个服务器，已删除。
+	if mode == config.DNSAuto && routeMode == config.RoutingSmart && geositeCN {
+		rules = append(rules, map[string]any{"rule_set": []string{"geosite-cn"}, "server": "dns-local"})
 	}
 	return map[string]any{"servers": servers, "rules": rules, "final": final, "strategy": "prefer_ipv4"}
+}
+
+// directRuleDomains 收集“直连”分流规则里的域名，按 sing-box 规则字段分组（domain / domain_suffix / domain_keyword）。
+// 直连模式下分流规则不生效，DNS 本来就全走 dns-local，不需要。
+func directRuleDomains(cfg config.Config) map[string][]string {
+	if cfg.RoutingMode == config.RoutingDirect {
+		return nil
+	}
+	out := map[string][]string{}
+	seen := map[string]bool{}
+	for _, r := range cfg.CustomRules {
+		kind, arg := config.SplitAction(r.Action)
+		value := strings.ToLower(strings.TrimSpace(r.Value))
+		key := strings.ToLower(strings.TrimSpace(r.MatchType))
+		if kind != "direct" || arg != "" || value == "" {
+			continue
+		}
+		switch key {
+		case "domain", "domain_suffix", "domain_keyword":
+		default:
+			continue
+		}
+		if seen[key+"\x00"+value] {
+			continue
+		}
+		seen[key+"\x00"+value] = true
+		out[key] = append(out[key], value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // shared 是走 CDN 的节点 IP：不能整体绕过 TUN，只让发往它们的 Ping（ICMP）直连，代理出站转发不了 ICMP。
@@ -244,13 +399,19 @@ func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[s
 	private := map[string]any{"ip_is_private": true, "outbound": "direct"}
 	dns := map[string]any{"protocol": "dns", "action": "hijack-dns"}
 	sniffed := []string{"tun-in"}
-	if cfg.LANProxyOn() != nil {
+	lanOn := cfg.LANProxyOn() != nil
+	if lanOn {
 		sniffed = append(sniffed, lanInboundTag)
 	}
-	base := []map[string]any{
-		{"inbound": sniffed, "action": "sniff", "timeout": "1s"},
-		dns,
+	var base []map[string]any
+	if lanOn {
+		// 局域网代理只接受来自私有网段的连接：机器有公网 IP 时也不会变成开放代理。
+		base = append(base, lanRejectPublicSource())
 	}
+	base = append(base,
+		map[string]any{"inbound": sniffed, "action": "sniff", "timeout": "1s"},
+		dns,
+	)
 	if len(shared) > 0 && runtime.GOOS != "android" {
 		base = append(base, map[string]any{"network": "icmp", "ip_cidr": shared, "outbound": "direct"})
 	}
@@ -276,7 +437,23 @@ func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[s
 			}
 		}
 	}
+	if lanOn {
+		// 局域网设备不能借代理访问本机：localhost 这类名字在解析之前就拒绝。
+		base = append(base, map[string]any{
+			"inbound": []string{lanInboundTag}, "domain": []string{"localhost"}, "domain_suffix": []string{".localhost"},
+			"action": "reject",
+		})
+	}
+	// 这里故意不写 "server"，按 DNS 规则选服务器：直连规则的域名、节点域名、国内域名走 dns-local（节点挂了也能解析），
+	// 其余走 dns-remote。不能统一指定 dns-local：resolve 之后 sing-box 把解析出的 IP（而不是域名）交给节点，
+	// 被墙域名从国内 DNS 拿到的是污染地址，经节点也连不上（实测 socks 节点收到的是 IP，见报告）。
+	// IP 目标（TUN 流量都是，内网地址也是）不做解析，节点挂了照样按 IP 规则直连。
 	base = append(base, map[string]any{"inbound": sniffed, "action": "resolve", "strategy": "prefer_ipv4"})
+	if lanOn {
+		// 解析之后再按 IP 拒绝发往本机（回环、链路本地、本机各网卡地址）的局域网代理连接，
+		// 必须排在所有分流规则之前，否则会被“内网地址直连”放行。
+		base = append(base, map[string]any{"inbound": []string{lanInboundTag}, "ip_cidr": lanDeniedDestinations(), "action": "reject"})
+	}
 	// 屏蔽规则最先匹配，不会被分流规则抢走。
 	for _, r := range cfg.DNSFilterRules {
 		if rr, ok := customRule(r, nil); ok {

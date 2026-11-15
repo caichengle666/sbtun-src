@@ -21,4 +21,4 @@ func pingCommand(ctx context.Context, host string) *exec.Cmd {
 }
 
 // setLANProxyFirewall 只有 Windows 需要；Linux 开了防火墙（ufw 等）需要自己放行端口。
-func setLANProxyFirewall(string, bool) {}
+func setLANProxyFirewall(string, uint16) error { return nil }

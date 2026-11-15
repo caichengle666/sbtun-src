@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/caichengle666/sbtun/config"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 )
 
 func TestGeneratedProtocolConfigsPassSingBoxCheck(t *testing.T) {
@@ -33,7 +34,7 @@ func TestGeneratedProtocolConfigsPassSingBoxCheck(t *testing.T) {
 	}
 	for _, node := range cases {
 		t.Run(node.ID, func(t *testing.T) {
-			data, err := BuildHealthConfig(node, 18080, "u", "p")
+			data, err := BuildHealthConfig(node, 18080, "u", "p", dnsprobe.Server{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,8 +132,8 @@ func TestParseWireGuardReserved(t *testing.T) {
 	}
 }
 
-func TestHealthDNSUsesPlatformResolver(t *testing.T) {
-	data, err := BuildHealthConfig(config.Node{ID: "n1", Protocol: "socks", Server: "127.0.0.1", Port: 1080}, 18080, "u", "p")
+func TestHealthDNSUsesBootstrapDNS(t *testing.T) {
+	data, err := BuildHealthConfig(config.Node{ID: "n1", Protocol: "socks", Server: "127.0.0.1", Port: 1080}, 18080, "u", "p", dnsprobe.Server{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,8 +148,28 @@ func TestHealthDNSUsesPlatformResolver(t *testing.T) {
 	dns := generated["dns"].(map[string]any)
 	servers := dns["servers"].([]any)
 	server := servers[0].(map[string]any)
-	if server["type"] != "local" || dns["final"] != "dns-local" {
-		t.Fatalf("unexpected platform health DNS: %+v", dns)
+	// 没选出引导 DNS 时用 DoH 223.5.5.5（IP，不依赖系统 DNS）。
+	if len(servers) != 1 || server["type"] != "https" || server["server"] != "223.5.5.5" || dns["final"] != "dns-local" {
+		t.Fatalf("unexpected health DNS: %+v", dns)
+	}
+	// 任何平台都不能再用 "local"（系统 DNS 可能是坏的）。
+	data, err = BuildHealthConfig(config.Node{ID: "n1", Protocol: "socks", Server: "example.com", Port: 1080}, 18080, "u", "p", dnsprobe.UDP("119.29.29.29"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"local"`) {
+		t.Fatalf("health config must not use the system resolver:\n%s", data)
+	}
+	generated = nil
+	if err := json.Unmarshal(data, &generated); err != nil {
+		t.Fatal(err)
+	}
+	server = generated["dns"].(map[string]any)["servers"].([]any)[0].(map[string]any)
+	if server["type"] != "udp" || server["server"] != "119.29.29.29" || server["server_port"] != float64(53) {
+		t.Fatalf("health DNS must follow the bootstrap choice: %+v", server)
+	}
+	if route := generated["route"].(map[string]any); route["default_domain_resolver"] != "dns-local" {
+		t.Fatalf("route=%v", route)
 	}
 }
 
@@ -397,20 +418,24 @@ func TestCustomDNSUsesModernServerShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	servers := runtime.DNS["servers"].([]any)
-	if len(servers) != 3 {
-		t.Fatalf("dns servers count=%d want=3", len(servers))
+	if len(servers) != 2 {
+		t.Fatalf("dns servers count=%d want=2 (dns-local-standby 已删除)", len(servers))
 	}
-	server := servers[2].(map[string]any)
+	server := servers[1].(map[string]any)
 	if server["type"] != "https" {
 		t.Fatalf("dns type=%v", server["type"])
 	}
 	if server["tag"] != "dns-remote" {
 		t.Fatalf("dns tag=%v", server["tag"])
 	}
-	if server["server"] != "cloudflare-dns.com" || server["server_port"] != float64(443) {
+	// 用 IP 访问，不需要 dns-local 引导：dns-local 不通时 dns-remote 照样能用。
+	if server["server"] != "1.1.1.1" || server["server_port"] != float64(443) {
 		t.Fatalf("dns endpoint=%v:%v", server["server"], server["server_port"])
 	}
-	if server["domain_resolver"] != "dns-local" || server["detour"] != "proxy" {
+	if tls, _ := server["tls"].(map[string]any); tls["server_name"] != "cloudflare-dns.com" {
+		t.Fatalf("dns tls=%v", server["tls"])
+	}
+	if _, ok := server["domain_resolver"]; ok || server["detour"] != "proxy" {
 		t.Fatalf("dns bootstrap=%v detour=%v", server["domain_resolver"], server["detour"])
 	}
 }
@@ -462,7 +487,8 @@ func TestSmartDNSUsesLocalRulesAndRemoteFallback(t *testing.T) {
 				hasRule = hasRule || rule["rule_set"] != nil
 				hasPrivate = hasPrivate || rule["ip_is_private"] == true
 			}
-			if hasRule != tc.wantRule || !hasPrivate {
+			// ip_is_private（旧版地址过滤字段）已删除。
+			if hasRule != tc.wantRule || hasPrivate {
 				t.Fatalf("dns rules=%v", runtime.DNS["rules"])
 			}
 			routeRules := runtime.Route["rules"].([]any)
@@ -569,7 +595,7 @@ func TestBuildConfigWithAuthProtectsLocalPorts(t *testing.T) {
 	cfg.CaptureEnabled = true
 	cfg.CaptureDomains = []string{"example.com"}
 	auth := LocalAuth{ClashSecret: "clash", ProxyUsername: "sbtun", ProxyPassword: "pw"}
-	data, err := BuildConfigWithAuth(cfg, t.TempDir(), auth, nil)
+	data, err := BuildConfigWithAuth(cfg, t.TempDir(), auth, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +642,7 @@ func TestNodeServersBypassTUNAndResolveLocally(t *testing.T) {
 		config.Node{ID: "dn2", Name: "dn2", Protocol: "socks", Server: "node.example.com", Port: 1081},
 	)
 	resolved := map[string][]netip.Addr{"node.example.com": {netip.MustParseAddr("198.51.100.9"), netip.MustParseAddr("203.0.113.7")}}
-	data, err := BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{}, resolved)
+	data, err := BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{}, resolved, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +662,7 @@ func TestNodeServersBypassTUNAndResolveLocally(t *testing.T) {
 	}
 
 	cfg.IPv6Enabled = true
-	data, err = BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{}, resolved)
+	data, err = BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{}, resolved, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +698,7 @@ func TestCDNNodesStayInTUN(t *testing.T) {
 		"direct.example.com": {netip.MustParseAddr("198.51.100.30"), netip.MustParseAddr("198.51.100.20"), netip.MustParseAddr("2606:4700::1")},
 	}
 	cfg.IPv6Enabled = true
-	data, err := BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{}, resolved)
+	data, err := BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{}, resolved, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,13 +733,13 @@ func TestCDNNodesStayInTUN(t *testing.T) {
 }
 
 func BuildConfig(cfg config.Config, exeDir string) ([]byte, error) {
-	return BuildConfigWithAuth(cfg, exeDir, LocalAuth{}, nil)
+	return BuildConfigWithAuth(cfg, exeDir, LocalAuth{}, nil, BuildOptions{})
 }
 
 func TestMobileInboundPassesSingBoxCheck(t *testing.T) {
 	binary := singBoxTestBinary(t)
 	cfg := testConfig(config.RoutingGlobal)
-	data, err := BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{ClashSecret: "s", ProxyUsername: "u", ProxyPassword: "p"}, nil)
+	data, err := BuildConfigWithAuth(cfg, t.TempDir(), LocalAuth{ClashSecret: "s", ProxyUsername: "u", ProxyPassword: "p"}, nil, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

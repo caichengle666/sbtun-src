@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/caichengle666/sbtun/config"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 )
 
 // 落地 IP 和地区：测速成功、节点还没查过时，经该节点访问查询接口，结果写回节点。
@@ -50,13 +51,13 @@ func lookupExit(ctx context.Context, client *http.Client) (ip, country string) {
 }
 
 // detectExit 起一个只带该节点的临时 sing-box 查落地；节点服务器本就绕过 TUN，运行中也能查。
-func detectExit(ctx context.Context, binary string, node config.Node) (ip, country string) {
+func detectExit(ctx context.Context, binary string, node config.Node, dns dnsprobe.Server) (ip, country string) {
 	if binary == "" {
 		return "", ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	proxy, err := startNodeProxy(ctx, binary, node, 6*time.Second)
+	proxy, err := startNodeProxy(ctx, binary, node, 6*time.Second, dns)
 	if err != nil {
 		return "", ""
 	}

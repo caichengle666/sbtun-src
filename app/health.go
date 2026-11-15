@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/caichengle666/sbtun/config"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 	"github.com/caichengle666/sbtun/core/singbox"
 )
 
@@ -44,7 +45,8 @@ type HealthCheckDTO struct {
 	StatusCode int    `json:"status_code,omitempty"`
 }
 
-func testNodeWithBinary(ctx context.Context, node config.Node, binary string) NodeHealthDTO {
+// testNodeWithBinary 在 TUN 未运行时测速：起一个只带该节点的临时 sing-box，dns 是它解析节点域名用的引导 DNS。
+func testNodeWithBinary(ctx context.Context, node config.Node, binary string, dns dnsprobe.Server) NodeHealthDTO {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -57,7 +59,7 @@ func testNodeWithBinary(ctx context.Context, node config.Node, binary string) No
 		result.Message = result.Port.Message
 		return result
 	}
-	result.URL = probeURL(ctx, binary, node)
+	result.URL = probeURL(ctx, binary, node, dns)
 	result.Healthy = result.URL.OK
 	if result.Healthy {
 		result.Message = "URL 访问成功"
@@ -173,7 +175,7 @@ type nodeProxy struct {
 	client *http.Client
 }
 
-func startNodeProxy(ctx context.Context, binary string, node config.Node, timeout time.Duration) (*nodeProxy, error) {
+func startNodeProxy(ctx context.Context, binary string, node config.Node, timeout time.Duration, dns dnsprobe.Server) (*nodeProxy, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("端口失败: %v", err)
@@ -188,7 +190,7 @@ func startNodeProxy(ctx context.Context, binary string, node config.Node, timeou
 	if err != nil {
 		return nil, err
 	}
-	data, err := singbox.BuildHealthConfig(node, port, user, pass)
+	data, err := singbox.BuildHealthConfig(node, port, user, pass, dns)
 	if err != nil {
 		return nil, fmt.Errorf("配置失败: %v", err)
 	}
@@ -263,9 +265,9 @@ func (p *nodeProxy) Close() {
 	_ = os.RemoveAll(p.dir)
 }
 
-func probeURL(ctx context.Context, binary string, node config.Node) HealthCheckDTO {
+func probeURL(ctx context.Context, binary string, node config.Node, dns dnsprobe.Server) HealthCheckDTO {
 	started := time.Now()
-	proxy, err := startNodeProxy(ctx, binary, node, 8*time.Second)
+	proxy, err := startNodeProxy(ctx, binary, node, 8*time.Second, dns)
 	if err != nil {
 		return HealthCheckDTO{Message: "URL " + err.Error()}
 	}

@@ -92,7 +92,7 @@ func (f *proxiedFetcher) do(ctx context.Context, request func(*http.Client) erro
 	}
 	last := ""
 	for _, node := range proxyCandidates(cfg) {
-		proxy, err := startNodeProxy(f.app.baseContext(), f.app.binary, node, f.timeout+5*time.Second)
+		proxy, err := startNodeProxy(f.app.baseContext(), f.app.binary, node, f.timeout+5*time.Second, f.app.bootstrapDNS())
 		if err == nil {
 			if err = proxy.waitReady(5 * time.Second); err == nil {
 				f.proxy = proxy

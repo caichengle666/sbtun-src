@@ -5,12 +5,13 @@ import (
 	"runtime"
 
 	"github.com/caichengle666/sbtun/config"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 )
 
 // BuildHealthConfig creates a temporary mixed-inbound config for a real URL
 // probe. The inbound requires username/password so other local programs cannot
-// use it as an open proxy.
-func BuildHealthConfig(node config.Node, listenPort int, username, password string) ([]byte, error) {
+// use it as an open proxy. bootstrap 是解析节点域名用的引导 DNS（零值时用 dnsprobe.Fallback()）。
+func BuildHealthConfig(node config.Node, listenPort int, username, password string, bootstrap dnsprobe.Server) ([]byte, error) {
 	proxy, err := buildOutbound(node)
 	if err != nil {
 		return nil, err
@@ -18,7 +19,7 @@ func BuildHealthConfig(node config.Node, listenPort int, username, password stri
 	outbounds, endpoints := splitEndpoints([]map[string]any{proxy})
 	result := map[string]any{
 		"log": map[string]any{"level": "error", "timestamp": true},
-		"dns": healthDNSConfig(),
+		"dns": healthDNSConfig(bootstrap),
 		"inbounds": []map[string]any{{
 			"type": "mixed", "tag": "health-in",
 			"listen": "127.0.0.1", "listen_port": listenPort,

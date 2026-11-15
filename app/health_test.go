@@ -12,6 +12,7 @@ import (
 
 	"github.com/caichengle666/sbtun/config"
 	"github.com/caichengle666/sbtun/core"
+	"github.com/caichengle666/sbtun/core/dnsprobe"
 )
 
 func TestTestNodeOnRunningInstanceUsesClashDelay(t *testing.T) {
@@ -151,7 +152,7 @@ func TestTestNodeUsesUDPForHysteria2(t *testing.T) {
 
 // testNode runs the checks without a sing-box binary (Ping and port only).
 func testNode(ctx context.Context, node config.Node) NodeHealthDTO {
-	return testNodeWithBinary(ctx, node, "")
+	return testNodeWithBinary(ctx, node, "", dnsprobe.Server{})
 }
 
 // TUN 运行时走 CDN 的节点 TCPing 会被本机协议栈直接握手，不测；直连型节点照常测。

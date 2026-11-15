@@ -30,7 +30,7 @@ func buildRuntime(t *testing.T, current config.Node, others ...config.Node) map[
 		cfg.Nodes = append(cfg.Nodes, n)
 	}
 	cfg.CurrentNodeID = "cur"
-	data, err := singbox.BuildConfigWithAuth(cfg, t.TempDir(), singbox.LocalAuth{}, nil)
+	data, err := singbox.BuildConfigWithAuth(cfg, t.TempDir(), singbox.LocalAuth{}, nil, singbox.BuildOptions{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

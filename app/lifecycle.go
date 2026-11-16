@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -63,6 +64,18 @@ type RuntimeCoordinator struct {
 	firewallKnown bool
 	// tunCleanup 不为空时代替 TUN.Cleanup（测试用）。
 	tunCleanup func() error
+
+	// 异常退出后的自动重启（见 auto_restart.go）。runCtx 是用户启动时的 ctx，取消（应用退出）后不再重启；
+	// restartToken 在用户启动、停止、重载时递增，让已安排的重启作废；restartTimes 是最近的重启时间。
+	runCtx       context.Context
+	restartToken uint64
+	restartTimes []time.Time
+	// restartStatus 由 restartMu 保护（写时同时持有 r.mu），读状态不拿 r.mu。
+	restartMu     sync.Mutex
+	restartStatus AutoRestartStatus
+	// restartBaseDelay、now 不为空时代替默认退避和时钟（测试用）。
+	restartBaseDelay time.Duration
+	now              func() time.Time
 }
 
 func NewRuntimeCoordinator(workDir, binary string) *RuntimeCoordinator {
@@ -136,6 +149,8 @@ func (r *RuntimeCoordinator) watchSingBoxExit() {
 		}
 		_ = r.syncLANFirewallLocked(nil)
 		r.State.Set(core.StateError, message)
+		// 不是用户停止、也不是应用退出：按次数限制和退避自动重启。
+		r.scheduleRestartLocked(message)
 		r.mu.Unlock()
 	}
 }
@@ -155,6 +170,8 @@ func (r *RuntimeCoordinator) Start(ctx context.Context, cfg config.Config) error
 	if state == core.StateStarting || state == core.StateRunning || state == core.StateStopping {
 		return fmt.Errorf("runtime already active: %s", state)
 	}
+	r.cancelAutoRestartLocked(true)
+	r.runCtx = ctx
 	_ = r.TUN.RecoverStale()
 	return r.startConfigLocked(ctx, cfg, resolved)
 }
@@ -230,6 +247,9 @@ func (r *RuntimeCoordinator) Reload(ctx context.Context, cfg config.Config) erro
 	if err != nil {
 		return fmt.Errorf("%s: %w", ErrConfigInvalid, err)
 	}
+	// 用户重载接管了启停，作废等待中的自动重启（不清计数：重载救不回反复崩溃的内核）。
+	r.cancelAutoRestartLocked(false)
+	r.runCtx = ctx
 	captureRestart := !r.activeConfigSet || captureConfigChanged(r.activeConfig, cfg)
 	r.State.Set(core.StateStopping, "")
 	if err := r.SingBox.Stop(); err != nil {
@@ -388,7 +408,12 @@ func (r *RuntimeCoordinator) buildConfig(cfg config.Config, resolved map[string]
 
 func (r *RuntimeCoordinator) configPath() string { return filepath.Join(r.WorkDir, "runtime.json") }
 
-// SyncConfig 生成并原子写入 runtime.json，不做 sing-box 校验（未运行时保存配置用）。
+// syncCheckTimeout 是未运行时保存配置调用 sing-box check 的上限。
+const syncCheckTimeout = 30 * time.Second
+
+// SyncConfig 生成 runtime.json（未运行时保存配置用）：先写临时文件跑 sing-box check，
+// 通过后才原子替换；校验失败时旧的 runtime.json 原样保留并返回错误。
+// 还没有 sing-box 内核（未下载）时无法校验，只原子写入，启动时 writeValidatedConfig 会再校验。
 // 不要在持有 r.mu 时调用（会做节点域名解析）；持锁的路径用 syncConfigResolved。
 func (r *RuntimeCoordinator) SyncConfig(cfg config.Config) (string, error) {
 	return r.syncConfigResolved(cfg, r.resolver.resolve(cfg.Nodes))
@@ -402,10 +427,30 @@ func (r *RuntimeCoordinator) syncConfigResolved(cfg config.Config, resolved map[
 	if err := os.MkdirAll(r.WorkDir, 0o755); err != nil {
 		return "", fmt.Errorf("创建运行目录失败: %w", err)
 	}
-	if err := atomicWrite(r.configPath(), data, nil); err != nil {
+	var check func(tmp string) error
+	if r.binaryAvailable() {
+		check = func(tmp string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), syncCheckTimeout)
+			defer cancel()
+			if err := singbox.ValidateConfig(ctx, r.Binary, tmp); err != nil {
+				return fmt.Errorf("%s: %w", ErrConfigInvalid, err)
+			}
+			return nil
+		}
+	}
+	if err := atomicWrite(r.configPath(), data, check); err != nil {
 		return "", fmt.Errorf("写入运行配置失败: %w", err)
 	}
 	return r.configPath(), nil
+}
+
+// binaryAvailable 报告 sing-box 内核是否存在、可以用来 check。
+func (r *RuntimeCoordinator) binaryAvailable() bool {
+	if r.Binary == "" {
+		return false
+	}
+	_, err := exec.LookPath(r.Binary)
+	return err == nil
 }
 
 // writeValidatedConfig 把配置写到临时文件，sing-box check 通过后才替换 runtime.json；
@@ -504,6 +549,8 @@ func (r *RuntimeCoordinator) Stop() error {
 	if r.State == nil {
 		return errors.New("runtime 状态未初始化")
 	}
+	// 用户停止或应用退出：作废等待中的自动重启。
+	r.cancelAutoRestartLocked(false)
 	state, _ := r.State.Get()
 	if state == core.StateStopped {
 		_ = r.syncLANFirewallLocked(nil)

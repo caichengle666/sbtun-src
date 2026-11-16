@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,5 +106,36 @@ func TestLoadMigratesCustomRoutingMode(t *testing.T) {
 	}
 	if cfg.RoutingMode != RoutingGlobal {
 		t.Fatalf("mode=%s", cfg.RoutingMode)
+	}
+}
+
+// 旧配置里的 tun_enabled 从来不生效（sbtun 总是建立 TUN），加载时应被忽略，保存后不再写出误导性的 false。
+func TestLegacyTUNEnabledKeyIsDropped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"version":1,"routing_mode":"smart","dns_mode":"auto","tun_enabled":false,"ipv6_enabled":false,"current_node_id":"","nodes":[]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(path)
+	cfg, err := m.Load()
+	if err != nil {
+		t.Fatalf("旧配置应能正常加载: %v", err)
+	}
+	if err := m.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "tun_enabled") {
+		t.Fatalf("保存后的配置不应再包含 tun_enabled: %s", data)
+	}
+	defaultJSON, err := json.Marshal(Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(defaultJSON), "tun_enabled") {
+		t.Fatalf("默认配置不应包含 tun_enabled: %s", defaultJSON)
 	}
 }

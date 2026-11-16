@@ -41,6 +41,7 @@ const state = {
   downloadPercent: { app: null, kernel: null },
   statusState: 'stopped',
   statusMessage: '',
+  portConflict: false,
   runtimeNodeID: '',
   selectorSyncState: 'idle',
   selectorSyncMessage: '',
@@ -146,6 +147,9 @@ const RULE_MATCH_TYPES = [
   { id: 'ip_cidr', label: 'IP 网段', hint: '填写 IPv4 或 IPv6 网段', placeholder: '例如 192.168.1.0/24' },
   { id: 'port', label: '端口', hint: '只填写一个端口号', placeholder: '例如 443' },
 ]
+
+// 已切换为明文显示的密码框（按 revealKey 记录，重绘后保持）
+const revealedSecrets = new Set()
 
 // 节点落地地区：国旗 + 中文名。国旗用两个区域指示符拼出，Windows 靠 style.css 里的 Twemoji 国旗字体显示。
 const REGION_NAMES = { HK: '香港', TW: '台湾', JP: '日本', KR: '韩国', SG: '新加坡', US: '美国', GB: '英国', DE: '德国', FR: '法国', NL: '荷兰', CA: '加拿大', AU: '澳大利亚', IN: '印度', TR: '土耳其', RU: '俄罗斯', MY: '马来西亚', TH: '泰国', ID: '印尼', MO: '澳门', VN: '越南', PH: '菲律宾', AR: '阿根廷', BR: '巴西', AE: '阿联酋', IT: '意大利', ES: '西班牙', CH: '瑞士', SE: '瑞典', PL: '波兰', UA: '乌克兰', IL: '以色列', MX: '墨西哥', CL: '智利', ZA: '南非', NZ: '新西兰', IE: '爱尔兰', FI: '芬兰', NO: '挪威', DK: '丹麦', AT: '奥地利', BE: '比利时', PT: '葡萄牙', CZ: '捷克', RO: '罗马尼亚', HU: '匈牙利', KZ: '哈萨克斯坦', PK: '巴基斯坦', BD: '孟加拉', SA: '沙特', EG: '埃及', NG: '尼日利亚', CO: '哥伦比亚', PE: '秘鲁', LU: '卢森堡', IS: '冰岛', GR: '希腊', BG: '保加利亚', RS: '塞尔维亚', LT: '立陶宛', LV: '拉脱维亚', EE: '爱沙尼亚', MN: '蒙古', KH: '柬埔寨', MM: '缅甸', LA: '老挝', NP: '尼泊尔', LK: '斯里兰卡', MD: '摩尔多瓦', GE: '格鲁吉亚', AM: '亚美尼亚', AZ: '阿塞拜疆' }
@@ -282,7 +286,7 @@ const NODE_FIELDS = {
     { key: 'insecure', label: '跳过证书校验', type: 'checkbox' },
   ],
   tuic: [
-    { key: 'uuid', label: 'UUID', placeholder: 'TUIC 用户 UUID', required: true },
+    { key: 'uuid', label: 'UUID', type: 'password', placeholder: 'TUIC 用户 UUID', required: true },
     { key: 'password', label: '密码', type: 'password', placeholder: 'TUIC 密码' },
     { key: 'congestion_control', label: '拥塞控制', type: 'select', options: [['', '默认 cubic'], ['bbr', 'bbr'], ['new_reno', 'new_reno']] },
     { key: 'udp_relay_mode', label: 'UDP 转发', type: 'select', options: [['', '默认 native'], ['quic', 'quic']] },
@@ -679,6 +683,34 @@ function renderTransportFields() {
   return ''
 }
 
+// 密码类输入框：默认 type=password，旁边放一个显示/隐藏按钮。revealKey 用来在重绘后保持「已显示」状态。
+function secretInputType(revealKey) {
+  return revealedSecrets.has(revealKey) ? 'text' : 'password'
+}
+function withSecretToggle(inputHtml, revealKey) {
+  const shown = revealedSecrets.has(revealKey)
+  const label = shown ? '隐藏密码' : '显示密码'
+  return `<span class="secret-input">${inputHtml}<button type="button" class="secret-toggle" data-secret-toggle="${escapeHtml(revealKey)}" aria-label="${label}" title="${label}" aria-pressed="${shown}">${shown ? '隐藏' : '显示'}</button></span>`
+}
+function bindSecretToggles() {
+  document.addEventListener('click', event => {
+    const button = event.target.closest?.('[data-secret-toggle]')
+    if (!button) return
+    event.preventDefault()
+    const input = button.parentElement?.querySelector('input')
+    if (!input) return
+    const key = button.dataset.secretToggle
+    const show = input.type === 'password'
+    if (show) revealedSecrets.add(key); else revealedSecrets.delete(key)
+    input.type = show ? 'text' : 'password'
+    const label = show ? '隐藏密码' : '显示密码'
+    button.textContent = show ? '隐藏' : '显示'
+    button.setAttribute('aria-label', label)
+    button.title = label
+    button.setAttribute('aria-pressed', String(show))
+  })
+}
+
 function renderSettingInput(key, label, placeholder) {
   return `<label class="setting-field"><span>${label}</span><input id="setting-${key}" data-setting="${key}" class="input" value="${escapeHtml(state.manualForm[key] || '')}" placeholder="${placeholder}" /></label>`
 }
@@ -692,6 +724,10 @@ function renderNodeField(field) {
     // 导入的值不在预设选项里时也要显示出来，否则保存时会被改成第一个选项。
     const options = value && !field.options.some(([key]) => key === value) ? [...field.options, [value, value]] : field.options
     return `<label class="setting-field"><span>${field.label}</span><select id="setting-${field.key}" data-setting="${field.key}" class="select">${options.map(([key, label]) => `<option value="${escapeHtml(key)}" ${value === key ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label>`
+  }
+  if (field.type === 'password') {
+    const revealKey = `node-${field.key}`
+    return `<label class="setting-field"><span>${field.label}</span>${withSecretToggle(`<input id="setting-${field.key}" data-setting="${field.key}" class="input" type="${secretInputType(revealKey)}" value="${escapeHtml(value)}" placeholder="${field.placeholder || ''}" autocomplete="off" ${field.required ? 'required' : ''} />`, revealKey)}</label>`
   }
   return `<label class="setting-field"><span>${field.label}</span><input id="setting-${field.key}" data-setting="${field.key}" class="input" type="${field.type || 'text'}" value="${escapeHtml(value)}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''} /></label>`
 }
@@ -746,7 +782,11 @@ function renderLANProxy() {
   if (!lan.enabled) return row
   const d = state.lanDraft || { port: String(port), username: lan.username || '', password: lan.password || '' }
   const addrs = state.lanAddresses.length ? state.lanAddresses.map(ip => `<code>${escapeHtml(ip)}:${port}</code>`).join('') : '<span class="muted">没找到本机局域网地址</span>'
-  const field = (key, label, type, placeholder) => `<label class="setting-field"><span>${label}</span><input class="input" data-lan-field="${key}" type="${type}" value="${escapeHtml(d[key])}" placeholder="${placeholder}" autocomplete="off" /></label>`
+  const field = (key, label, type, placeholder) => {
+    const revealKey = `lan-${key}`
+    const input = `<input class="input" data-lan-field="${key}" type="${type === 'password' ? secretInputType(revealKey) : type}" value="${escapeHtml(d[key])}" placeholder="${placeholder}" autocomplete="off" />`
+    return `<label class="setting-field"><span>${label}</span>${type === 'password' ? withSecretToggle(input, revealKey) : input}</label>`
+  }
   return `${row}<div class="lan-proxy-panel"><div class="lan-proxy-addrs"><span>设备上填</span>${addrs}</div>${state.running ? '' : '<p class="muted">sbtun 运行后才能连接。</p>'}${lan.username ? '' : '<p class="muted">没设密码时，同一网络里的任何设备都能用这个代理。</p>'}${field('port', '端口', 'text', '7890')}${field('username', '用户名', 'text', '可不填')}${field('password', '密码', 'password', '可不填')}<div class="lan-proxy-actions"><button id="saveLANProxy" class="btn btn-primary" ${busyAttr('lan')}>保存</button></div></div>`
 }
 
@@ -825,7 +865,7 @@ function renderCapturePage() {
       <summary class="capture-settings-summary"><div><h2>抓包规则与证书</h2><p class="muted">每行一个域名或关键词；输入 * 抓取全部 HTTP/HTTPS 请求。</p></div><span class="capture-settings-actions" aria-hidden="true">⌄</span></summary>
       <div class="capture-settings-content"><div class="section-heading"><span></span><button id="saveCapture" class="btn btn-primary" ${busyAttr('capture')}>保存并应用</button></div>
       <textarea id="captureDomains" class="input" rows="4" placeholder="例如 example.com、google；输入 * 抓取全部 HTTP/HTTPS">${escapeHtml(domains)}</textarea>
-      <div class="capture-settings-footer"><div class="capture-cert"><span class="badge ${status.certificate_installed ? 'direct' : ''}">${status.certificate_installed ? `证书已安装（${escapeHtml(status.certificate_level || '未知级别')}）` : '证书未安装'}</span>${status.user_certificate_supported ? `<select id="captureCertLevel" class="input capture-cert-level">${[['system', '系统级'], ['user', '当前用户']].map(([v, label]) => `<option value="${v}" ${state.captureCertLevel === v ? 'selected' : ''}>${label}</option>`).join('')}</select>` : '<span class="muted">Linux 使用系统级证书</span>'}<button id="installCaptureCA" class="btn btn-ghost" ${busyAttr('captureCA')}>安装系统证书</button><button id="uninstallCaptureCA" class="btn btn-ghost" ${busyAttr('captureCA')}>卸载系统证书</button></div><span class="capture-storage" title="${escapeHtml(status.storage_path || '')}">${escapeHtml(status.storage_path || 'capture.json')}</span></div>
+      <div class="capture-settings-footer"><div class="capture-cert"><span class="badge ${status.certificate_installed ? 'direct' : ''}">${status.certificate_installed ? `证书已安装（${escapeHtml(status.certificate_level || '未知级别')}）` : '证书未安装'}</span>${status.user_certificate_supported ? `<select id="captureCertLevel" class="input capture-cert-level">${[['system', '系统级'], ['user', '当前用户']].map(([v, label]) => `<option value="${v}" ${state.captureCertLevel === v ? 'selected' : ''}>${label}</option>`).join('')}</select>` : '<span class="muted">Linux 使用系统级证书</span>'}<button id="installCaptureCA" class="btn btn-ghost" ${busyAttr('captureCA')}>安装系统证书</button><button id="uninstallCaptureCA" class="btn btn-ghost" ${busyAttr('captureCA')}>卸载系统证书</button></div>${status.certificate_notice ? `<p class="muted capture-cert-notice">${escapeHtml(status.certificate_notice)}</p>` : ''}<span class="capture-storage" title="${escapeHtml(status.storage_path || '')}">${escapeHtml(status.storage_path || 'capture.json')}</span></div>
       </div>
     </details>
     <section class="card capture-records">
@@ -908,7 +948,11 @@ function renderBackupModal() {
   if (!b) return ''
   const f = b.form
   const busy = Boolean(b.busy)
-  const field = (key, label, type, placeholder) => `<label class="setting-field"><span>${label}</span><input id="backup-${key}" class="input" data-backup-field="${key}" type="${type}" value="${escapeHtml(f[key] || '')}" placeholder="${placeholder}" autocomplete="off" /></label>`
+  const field = (key, label, type, placeholder) => {
+    const revealKey = `backup-${key}`
+    const input = `<input id="backup-${key}" class="input" data-backup-field="${key}" type="${type === 'password' ? secretInputType(revealKey) : type}" value="${escapeHtml(f[key] || '')}" placeholder="${placeholder}" autocomplete="off" />`
+    return `<label class="setting-field"><span>${label}</span>${type === 'password' ? withSecretToggle(input, revealKey) : input}</label>`
+  }
   const list = !b.saved
     ? '<p class="muted">保存 WebDAV 设置后可以备份和恢复。</p>'
     : b.listError
@@ -1138,6 +1182,8 @@ function dotClass(s) {
 function statusLabel(s, msg) {
   const labels = { stopped: '已停止', starting: '正在启动...', running: '运行中', stopping: '正在停止...', error: '错误' }
   if (s === 'error' && msg) return '错误: ' + msg
+  // 9090 被其他程序占用：不是本实例在运行，直接把原因显示出来
+  if (s === 'stopped' && state.portConflict && msg) return '未运行: ' + msg
   return labels[s] || s
 }
 
@@ -1542,12 +1588,13 @@ function refreshStatus(force) {
 
 async function loadStatus() {
   try {
-    const previous = `${activeNodeID()}|${state.running}|${state.statusState}|${state.selectorSyncState}:${state.selectorSyncMessage}`
+    const previous = `${activeNodeID()}|${state.running}|${state.statusState}|${state.portConflict}|${state.selectorSyncState}:${state.selectorSyncMessage}`
     const s = await window.go.app.App.GetStatus()
     state.version = s.version || state.version
     state.running = s.running
     state.statusState = s.state
     state.statusMessage = s.message
+    state.portConflict = !!s.port_conflict
     state.traffic = { up: s.upload_bytes || 0, down: s.download_bytes || 0, upTotal: s.upload_total_bytes || 0, downTotal: s.download_total_bytes || 0 }
     state.trafficHistory.push({ up: state.traffic.up, down: state.traffic.down })
     if (state.trafficHistory.length > TRAFFIC_SLOTS) state.trafficHistory.shift()
@@ -1556,7 +1603,7 @@ async function loadStatus() {
     state.selectorSyncMessage = s.selector_sync_message || ''
     state.statusError = false
     // 运行状态变了，依赖它的按钮和文案（测试走向、全部断开、流量分析页等）要整页重绘
-    if (previous !== `${activeNodeID()}|${state.running}|${state.statusState}|${state.selectorSyncState}:${state.selectorSyncMessage}`) backgroundRender()
+    if (previous !== `${activeNodeID()}|${state.running}|${state.statusState}|${state.portConflict}|${state.selectorSyncState}:${state.selectorSyncMessage}`) backgroundRender()
     updateStatusView()
   } catch (e) {
     // 只在由成功转为失败时提示一次，避免每 2 秒刷屏
@@ -1980,6 +2027,7 @@ function bindEvents() {
     // 输入框失焦后补上被推迟的后台重绘（正在点击时由 bindPointerHold 在 click 之后补）
     app.addEventListener('focusout', () => setTimeout(flushPendingRender))
     bindPointerHold()
+    bindSecretToggles()
     state.documentEventsBound = true
   }
   document.querySelector('#appUpdate')?.addEventListener('click', () => {
@@ -2203,6 +2251,12 @@ function bindEvents() {
   document.querySelectorAll('[data-power]').forEach(power => power.addEventListener('click', () => {
     runOnce('power', async () => {
       updateStatusView()
+      if (!state.running && state.portConflict) {
+        // 端口被别的程序占着，启动必然失败；先提示用户处理占用
+        showToast(state.statusMessage || 'Clash API 端口被其他程序占用', 'error')
+        await refreshStatus(true)
+        return
+      }
       try {
         if (state.running) await window.go.app.App.Stop()
         else await window.go.app.App.Start()
@@ -2975,6 +3029,8 @@ async function setupTitlebar() {
   const runtime = window.runtime
   if (!runtime) return
   runtime.EventsOn?.('download-progress', onDownloadProgress)
+  // 后端运行状态一变就推送，立即刷新，不等 2 秒轮询
+  runtime.EventsOn?.('status-changed', () => { if (window.go?.app?.App) refreshStatus(true) })
   const platform = (await runtime.Environment().catch(() => ({}))).platform || ''
   document.documentElement.dataset.platform = platform
   if (platform === 'darwin' || platform === 'android') return

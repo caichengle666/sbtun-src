@@ -29,7 +29,7 @@ jobs:
           $principal = New-Object Security.Principal.WindowsPrincipal($identity)
           if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '需要管理员权限' }
 
-      - name: 下载最新 sing-box
+      - name: 下载最新 sing-box 与 Wintun
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,53 +55,19 @@ jobs:
           Copy-Item $wintunDll.FullName (Join-Path $exe.DirectoryName 'wintun.dll') -Force
           "SINGBOX=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8
           "WINTUN_VERSION=$wintunVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $dllInfo = Get-Item (Join-Path $exe.DirectoryName 'wintun.dll')
+          Write-Host "wintun.dll: $($dllInfo.FullName) ($($dllInfo.Length) bytes, 来自 $($wintunDll.FullName))"
           & $exe.FullName version
 
-      - name: 准备并启动真实 TUN
+      # 注意：Windows runner 会在每个 step 结束时结束该 step 启动的进程树，
+      # 所以启动 sing-box 和检测 TUN 必须放在同一个 step 里（见脚本说明）。
+      - name: 启动并检测真实 TUN 后端
         shell: pwsh
-        run: |
-          $dir = "$env:RUNNER_TEMP\sbtun-tun-test"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          @'
-          {"log":{"level":"trace","timestamp":true},"inbounds":[{"type":"tun","tag":"tun-test","address":["172.19.0.1/30"],"auto_route":false,"strict_route":false,"stack":"gvisor"}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"auto_detect_interface":true,"final":"direct"}}
-          '@ | Set-Content "$dir\config.json" -Encoding utf8
-          & $env:SINGBOX check -c "$dir\config.json"
-          if ($LASTEXITCODE -ne 0) { throw '配置检查失败' }
-          $proc = Start-Process -FilePath $env:SINGBOX -ArgumentList @('run','-c',"$dir\config.json") -WorkingDirectory $dir -RedirectStandardOutput "$dir\sing-box.log" -RedirectStandardError "$dir\sing-box.err" -PassThru
-          "SINGBOX_PID=$($proc.Id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TUN_TEST_DIR=$dir" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          Start-Sleep -Seconds 4
-          if ($proc.HasExited) { Get-Content "$dir\sing-box.log"; Get-Content "$dir\sing-box.err"; throw 'sing-box 启动失败' }
-          Write-Host "sing-box 已启动，PID=$($proc.Id)，Wintun=$env:WINTUN_VERSION"
+        run: ./.github/scripts/windows-tun-test.ps1 -SingBox $env:SINGBOX -WorkDir "$env:RUNNER_TEMP\sbtun-tun-test"
 
-      - name: 检测真实 TUN 后端
-        shell: pwsh
-        run: |
-          $found = $false
-          for ($i = 0; $i -lt 20; $i++) {
-            $process = Get-Process -Id ([int]$env:SINGBOX_PID) -ErrorAction SilentlyContinue
-            $address = @(Get-NetIPAddress -IPAddress '172.19.0.1' -ErrorAction SilentlyContinue)
-            $adapter = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wintun|sing-tun|sing-box' -or $_.Name -match 'Wintun|sing-tun|sing-box' })
-            Write-Host "检测 $($i + 1): address=$($address.Count), adapter=$($adapter.Count), process=$([bool]$process)"
-            if ($address.Count -gt 0 -and $process) { $found = $true; break }
-            Start-Sleep -Seconds 1
-          }
-          if (-not $found) {
-            Write-Host '--- Get-NetAdapter ---'
-            Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
-            Write-Host '--- Get-NetIPAddress ---'
-            Get-NetIPAddress -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
-            Write-Host '--- sing-box.log ---'
-            Get-Content "$env:TUN_TEST_DIR\sing-box.log" -ErrorAction SilentlyContinue
-            Write-Host '--- sing-box.err ---'
-            Get-Content "$env:TUN_TEST_DIR\sing-box.err" -ErrorAction SilentlyContinue
-            throw '真实 TUN 后端未正确初始化'
-          }
-          Write-Host '真实 TUN 后端初始化成功。'
-
-      - name: 检查进程并清理
+      - name: 清理残留进程
         if: always()
         shell: pwsh
         run: |
-          if ($env:SINGBOX_PID) { Stop-Process -Id ([int]$env:SINGBOX_PID) -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+          Get-Process -Name sing-box -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Write-Host 'Windows TUN 自动测试结束。'

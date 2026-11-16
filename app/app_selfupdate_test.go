@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -215,5 +216,149 @@ func TestGitHubReleasesPageURL(t *testing.T) {
 	got, err := githubReleasesPageURL("https://api.github.com/repos/caichengle666/sbtun/releases/latest")
 	if err != nil || got != "https://github.com/caichengle666/sbtun/releases/latest" {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+type testZipEntry struct {
+	name    string
+	content string
+	symlink bool
+	dir     bool
+}
+
+// writeTestZipEntries 按给定顺序写 zip，可以包含符号链接和目录。
+func writeTestZipEntries(t *testing.T, path string, entries []testZipEntry) {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for _, e := range entries {
+		header := &zip.FileHeader{Name: e.name, Method: zip.Deflate}
+		switch {
+		case e.symlink:
+			header.SetMode(os.ModeSymlink | 0o755)
+		case e.dir:
+			header.SetMode(os.ModeDir | 0o755)
+		default:
+			header.SetMode(0o644)
+		}
+		entry, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(e.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buffer.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func skipWithoutSymlinks(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Symlink("x", filepath.Join(dir, "probe")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+}
+
+func TestExtractZipKeepsBundleRelativeSymlinks(t *testing.T) {
+	skipWithoutSymlinks(t)
+	fw := "sbtun.app/Contents/Frameworks/Sparkle.framework/"
+	archive := filepath.Join(t.TempDir(), "ok.zip")
+	writeTestZipEntries(t, archive, []testZipEntry{
+		{name: fw + "Versions/A/Sparkle", content: "binary"},
+		{name: fw + "Versions/A/Resources/Info.plist", content: "plist"},
+		{name: fw + "Versions/Current", content: "A", symlink: true},
+		{name: fw + "Sparkle", content: "Versions/Current/Sparkle", symlink: true},
+		{name: fw + "Resources", content: "Versions/Current/Resources", symlink: true},
+		{name: "sbtun.app/Contents/MacOS/helper", content: "../Frameworks/Sparkle.framework/Sparkle", symlink: true},
+	})
+	dest := t.TempDir()
+	if err := extractZip(archive, dest); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestFile(t, filepath.Join(dest, filepath.FromSlash(fw+"Sparkle"))); got != "binary" {
+		t.Fatalf("Sparkle via link = %q", got)
+	}
+	if got := readTestFile(t, filepath.Join(dest, "sbtun.app/Contents/MacOS/helper")); got != "binary" {
+		t.Fatalf("helper via link = %q", got)
+	}
+	if link, err := os.Readlink(filepath.Join(dest, filepath.FromSlash(fw+"Versions/Current"))); err != nil || link != "A" {
+		t.Fatalf("Versions/Current = %q, %v", link, err)
+	}
+}
+
+func TestExtractZipRejectsUnsafeSymlinks(t *testing.T) {
+	skipWithoutSymlinks(t)
+	tests := []struct {
+		name    string
+		wantErr string
+		entries []testZipEntry
+	}{
+		{"dotdot escape", "安装目录之外", []testZipEntry{
+			{name: "sbtun.app/Contents/escape", content: "../../../outside", symlink: true},
+		}},
+		{"absolute", "绝对路径", []testZipEntry{
+			{name: "sbtun.app/Contents/abs", content: "/etc/passwd", symlink: true},
+		}},
+		// 链接本身指向 dest 内的目录（合法），但之后的条目想经过它写文件。
+		{"write through link", "经过符号链接", []testZipEntry{
+			{name: "sbtun.app/Contents/out", content: "../Resources", symlink: true},
+			{name: "sbtun.app/Contents/out/pwned", content: "evil"},
+		}},
+		// 单条看都在目录内，但组合后 dot/.. 实际跳出 dest。
+		{"chained links", "安装目录之外", []testZipEntry{
+			{name: "up", content: "dot/..", symlink: true},
+			{name: "dot", content: ".", symlink: true},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			dest := filepath.Join(base, "dest")
+			outside := filepath.Join(base, "outside")
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			archive := filepath.Join(base, "bad.zip")
+			writeTestZipEntries(t, archive, test.entries)
+			err := extractZip(archive, dest)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("err=%v, want containing %q", err, test.wantErr)
+			}
+			if _, err := os.Lstat(filepath.Join(outside, "pwned")); !os.IsNotExist(err) {
+				t.Fatalf("file written outside dest: %v", err)
+			}
+		})
+	}
+}
+
+func TestExtractZipRejectsWriteThroughPreexistingSymlink(t *testing.T) {
+	skipWithoutSymlinks(t)
+	base := t.TempDir()
+	dest := filepath.Join(base, "dest")
+	outside := filepath.Join(base, "outside")
+	os.MkdirAll(dest, 0o755)
+	os.MkdirAll(outside, 0o755)
+	// 链接本身合法（指向目录内），再借它覆盖一个已存在的同名链接目标也不行：
+	// 普通文件条目的目标路径本身是链接时必须拒绝，不能跟随链接写入。
+	archive := filepath.Join(base, "bad.zip")
+	writeTestZipEntries(t, archive, []testZipEntry{
+		{name: "a/real", content: "keep"},
+		{name: "a/alias", content: "real", symlink: true},
+		{name: "a/alias", content: "overwrite"},
+	})
+	if err := extractZip(archive, dest); err == nil || !strings.Contains(err.Error(), "经过符号链接") {
+		t.Fatalf("err=%v, want write through symlink rejected", err)
+	}
+	if got := readTestFile(t, filepath.Join(dest, "a", "real")); got != "keep" {
+		t.Fatalf("real overwritten through link: %q", got)
 	}
 }

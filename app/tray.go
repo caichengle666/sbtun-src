@@ -10,6 +10,13 @@ func (a *App) emitDownloadProgress(kind string, done, total int64) {
 	}
 }
 
+// emitStatusChanged 通知界面运行状态变了，界面马上重新拉取状态。异步发出，不占用调用方持有的锁。
+func (a *App) emitStatusChanged() {
+	if a.ctx != nil {
+		go runtime.EventsEmit(a.ctx, "status-changed")
+	}
+}
+
 func (a *App) HideToTray() {
 	if a.ctx != nil {
 		runtime.WindowHide(a.ctx)

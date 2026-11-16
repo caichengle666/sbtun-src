@@ -518,24 +518,43 @@ func fileModeOr(mode os.FileMode, name string) os.FileMode {
 
 // extractZip unpacks a whole archive (the macOS .app bundle), keeping modes,
 // symlinks and modification times.
+//
+// 符号链接只允许指向 dest 之内的相对路径（.app 包里的 Versions/Current、
+// Frameworks 等链接）；绝对路径或解析后跑出 dest 的链接整包拒绝。
+// 写文件、建目录前确认路径上没有任何符号链接，防止“先建链接、再通过链接写文件”。
 func extractZip(archive, dest string) error {
 	reader, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-	root := filepath.Clean(dest) + string(os.PathSeparator)
+	dest = filepath.Clean(dest)
+	root := dest + string(os.PathSeparator)
+	var links []string
 	for _, file := range reader.File {
+		if zipNameIsAbs(file.Name) {
+			return fmt.Errorf("安装包中有非法路径: %s", file.Name)
+		}
 		target := filepath.Join(dest, filepath.FromSlash(file.Name))
 		if !strings.HasPrefix(target+string(os.PathSeparator), root) {
 			return fmt.Errorf("安装包中有非法路径: %s", file.Name)
 		}
 		mode := file.Mode()
 		if mode.IsDir() {
+			if err := ensureNoSymlinkInPath(dest, target); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
 			continue
+		}
+		if target == dest {
+			return fmt.Errorf("安装包中有非法路径: %s", file.Name)
+		}
+		// 父目录和目标本身都不能是（或经过）符号链接，否则写入会落到 dest 之外。
+		if err := ensureNoSymlinkInPath(dest, target); err != nil {
+			return err
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
@@ -550,9 +569,13 @@ func extractZip(archive, dest string) error {
 			if readErr != nil {
 				return readErr
 			}
+			if err := checkSymlinkTarget(dest, target, string(link)); err != nil {
+				return fmt.Errorf("安装包中有非法符号链接 %s: %w", file.Name, err)
+			}
 			if err := os.Symlink(string(link), target); err != nil {
 				return err
 			}
+			links = append(links, target)
 			continue
 		}
 		err = writeFileFrom(target, fileModeOr(mode, file.Name), content)
@@ -562,5 +585,111 @@ func extractZip(archive, dest string) error {
 		}
 		_ = os.Chtimes(target, file.Modified, file.Modified)
 	}
+	// 链接之间可能互相引用（先建的链接经过后建的链接），全部建完后按最终状态再查一遍。
+	for _, target := range links {
+		link, err := os.Readlink(target)
+		if err != nil {
+			return err
+		}
+		if err := checkSymlinkTarget(dest, target, link); err != nil {
+			rel, _ := filepath.Rel(dest, target)
+			return fmt.Errorf("安装包中有非法符号链接 %s: %w", filepath.ToSlash(rel), err)
+		}
+	}
 	return nil
+}
+
+func zipNameIsAbs(name string) bool {
+	return strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") || filepath.IsAbs(name) || filepath.VolumeName(name) != ""
+}
+
+// ensureNoSymlinkInPath 检查 dest 之下到 target 的每一级已存在路径都不是符号链接。
+// target 本身也不能是符号链接（否则 O_TRUNC 打开会写到链接指向的文件）。
+func ensureNoSymlinkInPath(dest, target string) error {
+	rel, err := filepath.Rel(dest, target)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	current := dest
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		last := i == len(parts)-1
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // 后面的路径还不存在，不可能是链接
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("安装包试图经过符号链接写入: %s", filepath.ToSlash(rel))
+		}
+		if !last && !info.IsDir() {
+			return fmt.Errorf("安装包中有非法路径: %s", filepath.ToSlash(rel))
+		}
+	}
+	return nil
+}
+
+// checkSymlinkTarget 确认放在 linkPath 的链接内容 link 是相对路径，且按 dest 里的实际状态
+// （包括途经的其他链接）解析后仍在 dest 之内。尚不存在的路径按字面解析。
+func checkSymlinkTarget(dest, linkPath, link string) error {
+	if link == "" {
+		return errors.New("链接目标为空")
+	}
+	if zipNameIsAbs(link) || filepath.IsAbs(filepath.FromSlash(link)) {
+		return errors.New("不允许指向绝对路径")
+	}
+	parentRel, err := filepath.Rel(dest, filepath.Dir(linkPath))
+	if err != nil {
+		return err
+	}
+	queue := append(splitLinkPath(parentRel), splitLinkPath(link)...)
+	var resolved []string
+	hops := 0
+	for len(queue) > 0 {
+		part := queue[0]
+		queue = queue[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(resolved) == 0 {
+				return errors.New("指向安装目录之外")
+			}
+			resolved = resolved[:len(resolved)-1]
+			continue
+		}
+		current := filepath.Join(append([]string{dest}, append(resolved, part)...)...)
+		info, err := os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			resolved = append(resolved, part)
+			continue
+		}
+		hops++
+		if hops > 40 {
+			return errors.New("符号链接层数过多")
+		}
+		next, err := os.Readlink(current)
+		if err != nil {
+			return err
+		}
+		if zipNameIsAbs(next) || filepath.IsAbs(filepath.FromSlash(next)) {
+			return errors.New("途经指向绝对路径的链接")
+		}
+		queue = append(splitLinkPath(next), queue...)
+	}
+	return nil
+}
+
+// splitLinkPath 按 / 和 \ 拆分路径；把 \ 也当分隔符只会更严格。
+func splitLinkPath(path string) []string {
+	if path == "." {
+		return nil
+	}
+	return strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' })
 }

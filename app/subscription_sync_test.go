@@ -92,30 +92,64 @@ func TestUpdateSubscriptionReplacesNodesAndKeepsCurrent(t *testing.T) {
 	}
 }
 
-func TestImportSameSubscriptionAdoptsLegacyNodes(t *testing.T) {
+// 手动添加的节点和订阅里的节点参数相同时，手动节点不能被订阅收编，删除订阅后也必须还在。
+func TestImportSubscriptionNeverAdoptsManualNodes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("socks://127.0.0.1:1080#one"))
+		w.Write([]byte("socks://127.0.0.1:1080#one\nsocks://127.0.0.1:1081#two"))
 	}))
 	defer server.Close()
 
 	a := newSubscriptionTestApp(t)
-	legacy, err := parseSubscriptionLine("socks://127.0.0.1:1080#old")
+	manual, err := parseSubscriptionLine("socks://127.0.0.1:1080#mine")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.AddNode(legacy); err != nil {
+	if err := a.AddNode(manual); err != nil {
 		t.Fatal(err)
 	}
 	added, err := a.ImportSubscription(server.URL + "/sub")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 再导入一次（等同于更新）也不能收编。
 	if _, err := a.ImportSubscription(server.URL + "/sub"); err != nil {
 		t.Fatal(err)
 	}
 	cfg := a.GetConfig()
-	if added != 0 || len(cfg.Nodes) != 1 || len(cfg.Subscriptions) != 1 || cfg.Nodes[0].Subscription != cfg.Subscriptions[0].ID || cfg.Nodes[0].Name != "one" {
-		t.Fatalf("added=%d cfg=%+v", added, cfg)
+	if added != 1 || len(cfg.Nodes) != 2 || cfg.Nodes[0].Subscription != "" || cfg.Nodes[0].Name != "mine" || cfg.Nodes[1].Name != "two" {
+		t.Fatalf("added=%d cfg=%+v", added, cfg.Nodes)
+	}
+	if err := a.RemoveSubscription(cfg.Subscriptions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	cfg = a.GetConfig()
+	if len(cfg.Nodes) != 1 || cfg.Nodes[0].Name != "mine" || cfg.Nodes[0].Subscription != "" {
+		t.Fatalf("manual node lost after removing subscription: %+v", cfg.Nodes)
+	}
+}
+
+// 订阅自己的节点被跳过（和手动节点重复）时，选中的节点改到参数相同的手动节点上，不跳到列表第一个。
+func TestMergeKeepsCurrentWhenSubscriptionCopyDuplicatesManual(t *testing.T) {
+	first := vlessNode("first", "z.example", "/z")
+	manual := vlessNode("m", "a.example", "/x")
+	owned := vlessNode("o", "a.example", "/x")
+	owned.Subscription = "mine"
+	before := config.Config{CurrentNodeID: "o", Nodes: []config.Node{first, manual, owned}}
+	next := before
+	next.Nodes, _ = mergeSubscriptionNodes(before.Nodes, "mine", []config.Node{vlessNode("n", "a.example", "/x")})
+	keepCurrentNodeByName(before, &next, "mine")
+	ensureCurrentNode(&next)
+	if got := nodeIDs(next.Nodes); len(got) != 2 || got[1] != "m" || next.CurrentNodeID != "m" {
+		t.Fatalf("nodes=%v current=%s", got, next.CurrentNodeID)
+	}
+}
+
+// 从备份恢复时，备份里的手动节点也不能被订阅收编。
+func TestRestoreMergeKeepsManualNodes(t *testing.T) {
+	manual := vlessNode("m", "a.example", "/x")
+	out, _ := mergeSubscriptionNodes([]config.Node{manual}, "s", []config.Node{vlessNode("n", "a.example", "/x"), vlessNode("k", "b.example", "/y")})
+	if len(out) != 2 || out[0].ID != "m" || out[0].Subscription != "" || out[1].Subscription != "s" {
+		t.Fatalf("out=%+v", out)
 	}
 }
 

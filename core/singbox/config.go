@@ -76,16 +76,17 @@ func BuildConfigWithAuth(cfg config.Config, exeDir string, auth LocalAuth, resol
 		}
 		outbounds = append(outbounds, captureOutbound)
 	}
+	v6 := planIPv6(cfg.IPv6Enabled)
 	tunInbound := map[string]any{
 		"type": "tun", "tag": "tun-in",
-		"address":    tunAddresses(cfg.IPv6Enabled),
+		"address":    tunAddresses(v6),
 		"auto_route": true, "strict_route": cfg.WebRTCProtectionEnabled, "stack": "system",
 	}
 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
 		tunInbound["interface_name"] = tun.InterfaceName
 	}
 	// 直连型节点的 IP 在系统路由层绕过 TUN，Ping/TCPing 测的是节点本身，不经当前节点。
-	exclude, shared := nodeAddrs(cfg.Nodes, resolved, cfg.IPv6Enabled)
+	exclude, shared := nodeAddrs(cfg.Nodes, resolved, v6.active)
 	if len(exclude) > 0 {
 		tunInbound["route_exclude_address"] = exclude
 	}
@@ -117,11 +118,11 @@ func BuildConfigWithAuth(cfg config.Config, exeDir string, auth LocalAuth, resol
 	result := RuntimeConfig{
 		Schema:    "https://sing-box.sagernet.org/schema.json",
 		Log:       map[string]any{"level": "info", "timestamp": true},
-		DNS:       buildDNS(cfg.DNSMode, cfg.RoutingMode, NodeDomains(cfg.Nodes), directRuleDomains(cfg), hasRuleSet(ruleSets, "geosite-cn"), opts.BootstrapDNS),
+		DNS:       buildDNS(cfg.DNSMode, cfg.RoutingMode, NodeDomains(cfg.Nodes), directRuleDomains(cfg), hasRuleSet(ruleSets, "geosite-cn"), opts.BootstrapDNS, v6.dnsStrategy()),
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
 		Endpoints: endpoints,
-		Route:     routeForMode(cfg, ruleSets, targets, exeDir, shared),
+		Route:     routeForMode(cfg, ruleSets, targets, exeDir, shared, v6),
 		Experimental: map[string]any{
 			"cache_file": map[string]any{"enabled": true},
 			"clash_api":  clashAPI,
@@ -324,7 +325,8 @@ func bootstrapDNSServer(server dnsprobe.Server) map[string]any {
 // 否则 DNS 规则不能引用它，sing-box 会报 rule-set not found 拒绝整份配置。
 // dns-remote 用 IP 访问 Cloudflare DoH，经当前节点发出，不依赖 dns-local。
 // direct 是“直连”分流规则里的域名：它们本来就直连，解析也用 dns-local，当前节点挂了也照样能用。
-func buildDNS(mode config.DNSMode, routeMode config.RoutingMode, nodeDomains []string, direct map[string][]string, geositeCN bool, bootstrap dnsprobe.Server) map[string]any {
+// strategy 是地址族策略（见 ipv6Plan.dnsStrategy）：IPv6 没开或不可用时为 ipv4_only，AAAA 查询回空，应用不会拿到 IPv6 地址。
+func buildDNS(mode config.DNSMode, routeMode config.RoutingMode, nodeDomains []string, direct map[string][]string, geositeCN bool, bootstrap dnsprobe.Server, strategy string) map[string]any {
 	servers := []map[string]any{
 		bootstrapDNSServer(bootstrap),
 		{
@@ -358,7 +360,7 @@ func buildDNS(mode config.DNSMode, routeMode config.RoutingMode, nodeDomains []s
 	if mode == config.DNSAuto && routeMode == config.RoutingSmart && geositeCN {
 		rules = append(rules, map[string]any{"rule_set": []string{"geosite-cn"}, "server": "dns-local"})
 	}
-	return map[string]any{"servers": servers, "rules": rules, "final": final, "strategy": "prefer_ipv4"}
+	return map[string]any{"servers": servers, "rules": rules, "final": final, "strategy": strategy}
 }
 
 // directRuleDomains 收集“直连”分流规则里的域名，按 sing-box 规则字段分组（domain / domain_suffix / domain_keyword）。
@@ -394,7 +396,7 @@ func directRuleDomains(cfg config.Config) map[string][]string {
 }
 
 // shared 是走 CDN 的节点 IP：不能整体绕过 TUN，只让发往它们的 Ping（ICMP）直连，代理出站转发不了 ICMP。
-func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[string]string, exeDir string, shared []string) map[string]any {
+func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[string]string, exeDir string, shared []string, v6 ipv6Plan) map[string]any {
 	mode, captureEnabled, captureDomains := cfg.RoutingMode, cfg.CaptureEnabled, cfg.CaptureDomains
 	private := map[string]any{"ip_is_private": true, "outbound": "direct"}
 	dns := map[string]any{"protocol": "dns", "action": "hijack-dns"}
@@ -412,6 +414,11 @@ func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[s
 		map[string]any{"inbound": sniffed, "action": "sniff", "timeout": "1s"},
 		dns,
 	)
+	if !v6.active {
+		// IPv6 没开或本机没有可用 IPv6：TUN 仍接管 IPv6 路由，这里把所有 IPv6 目标直接拒绝（TCP 回 RST，应用立即回落 IPv4），
+		// 既不经节点也不直连，真实 IPv6 地址不会暴露。DNS 查询已在上一条被劫持，不受影响。
+		base = append(base, map[string]any{"ip_version": 6, "action": "reject"})
+	}
 	if len(shared) > 0 && runtime.GOOS != "android" {
 		base = append(base, map[string]any{"network": "icmp", "ip_cidr": shared, "outbound": "direct"})
 	}
@@ -448,7 +455,7 @@ func routeForMode(cfg config.Config, ruleSets []configuredRuleSet, targets map[s
 	// 其余走 dns-remote。不能统一指定 dns-local：resolve 之后 sing-box 把解析出的 IP（而不是域名）交给节点，
 	// 被墙域名从国内 DNS 拿到的是污染地址，经节点也连不上（实测 socks 节点收到的是 IP，见报告）。
 	// IP 目标（TUN 流量都是，内网地址也是）不做解析，节点挂了照样按 IP 规则直连。
-	base = append(base, map[string]any{"inbound": sniffed, "action": "resolve", "strategy": "prefer_ipv4"})
+	base = append(base, map[string]any{"inbound": sniffed, "action": "resolve", "strategy": v6.dnsStrategy()})
 	if lanOn {
 		// 解析之后再按 IP 拒绝发往本机（回环、链路本地、本机各网卡地址）的局域网代理连接，
 		// 必须排在所有分流规则之前，否则会被“内网地址直连”放行。

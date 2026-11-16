@@ -195,16 +195,14 @@ func (a *App) applySubscriptionLocked(sub config.Subscription, fresh []config.No
 }
 
 // mergeSubscriptionNodes 用 fresh 替换属于 subID 的节点，并保持其在列表中的位置。
-// 节点按参数指纹比对：参数没变的节点沿用原 ID（当前选中不丢）；未归属任何订阅、
-// 但参数完全相同的旧节点会被收编；属于其他订阅的相同节点跳过。
+// 节点按参数指纹比对：参数没变的节点沿用原 ID（当前选中不丢）。
+// 手动添加的节点（不属于任何订阅）永远不会被归到订阅名下：以前会被“收编”，之后删除订阅或
+// 订阅不再提供它时就被连带删掉。现在订阅里和手动节点或其他订阅节点参数完全相同的节点直接跳过，
+// 手动节点原样保留——这是不会丢数据、也不会出现重复节点的做法。
 func mergeSubscriptionNodes(nodes []config.Node, subID string, fresh []config.Node) ([]config.Node, SubscriptionUpdateDTO) {
-	freshFPs := make(map[string]struct{}, len(fresh))
-	for _, n := range fresh {
-		freshFPs[nodeFingerprint(n)] = struct{}{}
-	}
-	otherFPs := make(map[string]struct{}) // 其他订阅里节点的指纹
+	otherFPs := make(map[string]struct{}) // 手动节点和其他订阅里节点的指纹
 	for _, n := range nodes {
-		if n.Subscription != "" && n.Subscription != subID {
+		if n.Subscription != subID {
 			otherFPs[nodeFingerprint(n)] = struct{}{}
 		}
 	}
@@ -214,9 +212,7 @@ func mergeSubscriptionNodes(nodes []config.Node, subID string, fresh []config.No
 	replaced := make([]bool, len(nodes))
 	for i, n := range nodes {
 		fp := nodeFingerprint(n)
-		_, inFresh := freshFPs[fp]
-		_, inOther := otherFPs[fp]
-		if n.Subscription == subID || n.Subscription == "" && inFresh && !inOther {
+		if n.Subscription == subID {
 			replaced[i] = true
 			if _, ok := ownedIDs[fp]; !ok {
 				ownedIDs[fp] = n.ID
@@ -361,6 +357,15 @@ func keepCurrentNodeByName(before config.Config, next *config.Config, subID stri
 	}
 	if id := firstNonEmpty(sameName, sameAddr); id != "" {
 		next.CurrentNodeID = id
+		return
+	}
+	// 订阅里的这个节点和手动节点（或其他订阅的节点）参数完全相同而被跳过：改选那个节点，连接不变。
+	fp := nodeFingerprint(*current)
+	for _, n := range next.Nodes {
+		if nodeFingerprint(n) == fp {
+			next.CurrentNodeID = n.ID
+			return
+		}
 	}
 }
 

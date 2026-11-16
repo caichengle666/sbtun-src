@@ -35,11 +35,14 @@ type Rule struct {
 
 // Config 是 sbtun 的用户配置模型。
 // 它刻意与 sing-box runtime JSON 解耦，普通用户无需接触 sing-box 配置。
+//
+// 旧版本有一个 tun_enabled 字段，但从来没有代码读取它：sbtun 启动时总是建立 TUN，
+// 而默认值写出的却是 "tun_enabled": false，与实际行为相反。现已删除该字段；
+// 旧配置里的这个键在加载时被忽略，下次保存时自然消失。
 type Config struct {
 	Version                 int         `json:"version"`
 	RoutingMode             RoutingMode `json:"routing_mode"`
 	DNSMode                 DNSMode     `json:"dns_mode"`
-	TUNEnabled              bool        `json:"tun_enabled"`
 	IPv6Enabled             bool        `json:"ipv6_enabled"`
 	WebRTCProtectionEnabled bool        `json:"webrtc_protection_enabled,omitempty"`
 	DiagnosticsEnabled      bool        `json:"diagnostics_enabled,omitempty"`

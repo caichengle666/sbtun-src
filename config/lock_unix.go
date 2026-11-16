@@ -19,7 +19,8 @@ func withConfigLock(path string, action func() error) error {
 	// sudo/pkexec 下新建的目录和锁文件交还调用者，否则普通用户以后无法在里面写文件、打开锁。
 	_ = applyInvokerOwnership(filepath.Dir(path))
 	lockPath := path + ".lock"
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDONLY, 0o666)
+	// O_NOFOLLOW：锁文件是符号链接时直接失败。以 root 运行时跟随它会在链接指向的任意位置建文件，再被交给调用者。
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDONLY|syscall.O_NOFOLLOW, 0o666)
 	if err != nil {
 		return fmt.Errorf("打开配置锁失败: %w", err)
 	}

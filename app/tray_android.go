@@ -8,6 +8,7 @@ func (a *App) StartTray()                                {}
 func (a *App) HideToTray()                               {}
 func (a *App) ShowWindow()                               {}
 func (a *App) emitDownloadProgress(string, int64, int64) {}
+func (a *App) emitStatusChanged()                        {}
 func (a *App) MinimizeToTray()                           {}
 func (a *App) CloseToTray()                              {}
 

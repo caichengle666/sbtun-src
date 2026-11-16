@@ -62,6 +62,7 @@ func (a *App) SetTrayIcon(icon []byte) {
 func (a *App) Startup(ctx context.Context) {
 	a.gui = true
 	a.startupCore(ctx)
+	a.watchStatusChanges()
 	// The GUI holds the single-instance lock, so leftovers from a killed run
 	// (system DNS on macOS, an orphaned sing-box) can be undone before TUN is turned on.
 	_ = a.runtime.TUN.RecoverStale()
@@ -157,6 +158,10 @@ type StatusDTO struct {
 	CurrentNodeID       string `json:"current_node_id,omitempty"`
 	SelectorSyncState   string `json:"selector_sync_state,omitempty"`
 	SelectorSyncMessage string `json:"selector_sync_message,omitempty"`
+	// AutoRestart 是 sing-box 异常退出后的自动重启情况；gave_up 为 true 表示已停止自动重启，reason 是原因。
+	AutoRestart *AutoRestartStatus `json:"auto_restart,omitempty"`
+	// PortConflict 为 true 表示 Clash API 端口被其他程序占用，Running 已判为 false。
+	PortConflict bool `json:"port_conflict,omitempty"`
 }
 
 type DiagnosticsDTO struct {
@@ -282,6 +287,20 @@ func (a *App) UninstallCaptureCertificate(level string) error {
 }
 
 func (a *App) GetStatus() StatusDTO {
+	result := a.runtimeStatus()
+	if result.AutoRestart == nil && !result.Running && a.runtime != nil {
+		// CLI status 在另一个进程里：读 sbtun run 放弃自动重启时留下的原因。
+		if report, ok := loadExitReport(a.runtime.WorkDir); ok {
+			result.AutoRestart = &report
+			if result.Message == "" {
+				result.Message = report.Reason
+			}
+		}
+	}
+	return result
+}
+
+func (a *App) runtimeStatus() StatusDTO {
 	if a.runtime == nil || a.runtime.State == nil {
 		return StatusDTO{Version: Version(), State: string(core.StateStopped), Message: "运行时未初始化"}
 	}
@@ -291,6 +310,9 @@ func (a *App) GetStatus() StatusDTO {
 	a.trafficMu.RUnlock()
 	result := StatusDTO{Version: Version(), State: string(state), Message: message, Running: state == core.StateRunning, UploadBytes: up, DownloadBytes: down, UploadTotalBytes: upTotal, DownloadTotalBytes: downTotal}
 	result.SelectorSyncState, result.SelectorSyncMessage = a.selectorSyncStatus()
+	if restart := a.runtime.AutoRestartStatus(); restart.Count > 0 || restart.GaveUp {
+		result.AutoRestart = &restart
+	}
 	if a.manager == nil {
 		if result.Message == "" {
 			result.Message = "配置管理器未初始化"
@@ -305,7 +327,37 @@ func (a *App) GetStatus() StatusDTO {
 		return result
 	}
 	result.CurrentNodeID = cfg.CurrentNodeID
+	if !a.clashAPIIsOurs(&result) {
+		return result
+	}
 	if selector, selectorErr := currentSelector(); selectorErr == nil {
+		result.Selector = selector
+		if id := nodeIDFromSelector(cfg, selector); id != "" {
+			result.CurrentNodeID = id
+		}
+	}
+	return result
+}
+
+// managedSingBoxAlive 报告本实例启动的 sing-box 进程是否还活着。
+func (a *App) managedSingBoxAlive() bool {
+	return a.runtime != nil && a.runtime.SingBox != nil && a.runtime.SingBox.Running()
+}
+
+// clashAPIIsOurs 判断 Clash API 端口上是不是本实例的 sing-box，并据此修正 result 的运行状态。
+// 返回 true 时可以继续从 Clash API 读取当前节点。
+func (a *App) clashAPIIsOurs(result *StatusDTO) bool {
+	if currentClashAPISecret() == "" {
+		// 没有 secret 就无法区分端口上的程序是谁，只信本实例管理的进程。
+		if result.Running && !a.managedSingBoxAlive() {
+			result.State = string(core.StateStopped)
+			result.Message = "sing-box 未运行"
+			result.Running = false
+		}
+		return result.Running
+	}
+	switch probeClashInstance(context.Background()) {
+	case clashProbeOurs:
 		if !result.Running {
 			// A CLI status invocation has no in-memory runtime state, but it
 			// must still report an already-running sing-box process.
@@ -313,12 +365,19 @@ func (a *App) GetStatus() StatusDTO {
 			result.Message = "sing-box 运行中"
 			result.Running = true
 		}
-		result.Selector = selector
-		if id := nodeIDFromSelector(cfg, selector); id != "" {
-			result.CurrentNodeID = id
+		return true
+	case clashProbeForeign:
+		// 端口上是别的程序：不是本实例在运行。启动/停止中的过渡状态保持原样。
+		if result.State != string(core.StateStarting) && result.State != string(core.StateStopping) {
+			result.State = string(core.StateStopped)
+			result.Running = false
 		}
+		result.Message = portConflictMessage()
+		result.PortConflict = true
+		return false
+	default:
+		return result.Running
 	}
-	return result
 }
 
 func nodeIDFromSelector(cfg config.Config, selector string) string {
@@ -889,8 +948,7 @@ func (a *App) selectNodeLocked(id string) error {
 	// stopped even when another sbtun process is serving Clash API requests.
 	apiRunning := false
 	if !running {
-		_, apiErr := currentSelector()
-		apiRunning = apiErr == nil
+		apiRunning = probeClashInstance(context.Background()) == clashProbeOurs
 	}
 	selectorActive := running || apiRunning
 	switchedSelector := false

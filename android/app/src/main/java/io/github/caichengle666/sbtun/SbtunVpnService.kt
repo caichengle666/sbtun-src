@@ -28,6 +28,7 @@ class SbtunVpnService : VpnService() {
         private var ready = CompletableFuture<SbtunVpnService>()
         private var lastRequest = 0
         private var wanted = 0 // 正在等待的请求编号，0 表示没有
+        private var currentRequest = 0 // current 是由哪个请求拉起的，0 表示系统拉起（始终开启的 VPN 等）
 
         // 登记一次启动请求，返回拉起服务用的 intent 和等服务就绪的 future。
         @Synchronized
@@ -36,11 +37,15 @@ class SbtunVpnService : VpnService() {
             return Intent(context, SbtunVpnService::class.java).putExtra(EXTRA_REQUEST, wanted) to ready
         }
 
-        // 请求失败或超时：作废编号（服务稍后才起来时自己退出），已起来的服务直接收掉。
+        // 请求失败或超时：作废编号（服务稍后才起来时自己退出），只收掉由这次请求拉起的服务。
+        // 不能无条件收掉 current：它可能是系统拉起的实例（始终开启的 VPN，等待中被 ready 交给了这次请求），
+        // 对它 stopSelf 会把系统的始终开启连接断掉；那个实例由自己的自动连接线程负责收尾。
         @Synchronized
         fun abandon(intent: Intent) {
-            if (wanted == intent.getIntExtra(EXTRA_REQUEST, 0)) wanted = 0
-            current?.shutdown()
+            val id = intent.getIntExtra(EXTRA_REQUEST, 0)
+            if (id == 0) return
+            if (wanted == id) wanted = 0
+            if (currentRequest == id) current?.shutdown()
         }
 
         // 系统拉起（id 为 0）总是接上；应用的请求只接仍在等待的那个。
@@ -48,6 +53,7 @@ class SbtunVpnService : VpnService() {
         private fun attach(service: SbtunVpnService, id: Int): Boolean {
             if (id != 0 && id != wanted) return false
             current = service
+            currentRequest = id
             ready.complete(service)
             return true
         }
@@ -56,6 +62,7 @@ class SbtunVpnService : VpnService() {
         private fun detach(service: SbtunVpnService) {
             if (current !== service) return
             current = null
+            currentRequest = 0
             ready = CompletableFuture()
         }
     }

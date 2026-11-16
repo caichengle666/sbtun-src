@@ -128,6 +128,13 @@ func main() {
 		if status.Selector != "" {
 			fmt.Printf("运行时 selector: %s\n", status.Selector)
 		}
+		if restart := status.AutoRestart; restart != nil {
+			if restart.GaveUp {
+				fmt.Printf("自动重启: 已停止（%s）\n%s\n", restart.At.Local().Format("2006-01-02 15:04:05"), restart.Reason)
+			} else {
+				fmt.Printf("自动重启: 1 分钟内已重启 %d 次，最近一次退出原因: %s\n", restart.Count, restart.Reason)
+			}
+		}
 		autoSwitch := "开启"
 		if cfg.AutoSwitchDisabled {
 			autoSwitch = "关闭"
@@ -1060,6 +1067,12 @@ func runCaptureCommand(application *app.App, args []string) error {
 			certificateLevel, status.StoragePath)
 		if status.Message != "" {
 			fmt.Printf("状态信息: %s\n", status.Message)
+		}
+		if status.CertificateNotice != "" {
+			fmt.Printf("证书提示: %s\n", status.CertificateNotice)
+			if status.CertificateStillTrusted {
+				fmt.Println("手动卸载: sbtun capture cert uninstall [system|user]")
+			}
 		}
 		return nil
 	case "list":

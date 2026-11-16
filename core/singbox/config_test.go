@@ -230,7 +230,7 @@ func TestSmartRoutingUsesChinaRuleSets(t *testing.T) {
 	if len(sets) != 2 {
 		t.Fatalf("rule_set count=%d want=2", len(sets))
 	}
-	routeRules := runtime.Route["rules"].([]any)
+	routeRules := withoutIPv6Reject(runtime.Route["rules"].([]any))
 	if len(routeRules) != 6 {
 		t.Fatalf("smart route rules=%d want=6", len(routeRules))
 	}
@@ -300,7 +300,7 @@ func TestCustomRoutingRule(t *testing.T) {
 	if err := json.Unmarshal(data, &runtime); err != nil {
 		t.Fatal(err)
 	}
-	rules := runtime.Route["rules"].([]any)
+	rules := withoutIPv6Reject(runtime.Route["rules"].([]any))
 	if len(rules) < 6 {
 		t.Fatalf("rules count=%d want at least 6", len(rules))
 	}
@@ -325,7 +325,7 @@ func TestCaptureRulesHavePriorityAndAvoidLoop(t *testing.T) {
 	if err := json.Unmarshal(data, &runtime); err != nil {
 		t.Fatal(err)
 	}
-	rules := runtime.Route["rules"].([]any)
+	rules := withoutIPv6Reject(runtime.Route["rules"].([]any))
 	if rules[2].(map[string]any)["domain_suffix"] == nil || rules[2].(map[string]any)["outbound"] != "block" {
 		t.Fatalf("capture domain UDP rule missing: %+v", rules[2])
 	}
@@ -373,7 +373,7 @@ func TestCaptureAllRoutesHTTPOnlyFromTun(t *testing.T) {
 	if err := json.Unmarshal(data, &runtime); err != nil {
 		t.Fatal(err)
 	}
-	rules := runtime.Route["rules"].([]any)
+	rules := withoutIPv6Reject(runtime.Route["rules"].([]any))
 	udp := rules[2].(map[string]any)
 	tcp := rules[3].(map[string]any)
 	if udp["outbound"] != "block" || udp["network"] != "udp" || tcp["outbound"] != "capture" || tcp["network"] != "tcp" {
@@ -509,6 +509,7 @@ func TestSmartDNSUsesLocalRulesAndRemoteFallback(t *testing.T) {
 }
 
 func TestTUNKeepsWindowsCompatibleRouteMode(t *testing.T) {
+	stubIPv6(t, false, false)
 	data, err := BuildConfig(testConfig(config.RoutingGlobal), "D:\\test")
 	if err != nil {
 		t.Fatal(err)
@@ -517,20 +518,31 @@ func TestTUNKeepsWindowsCompatibleRouteMode(t *testing.T) {
 	if err := json.Unmarshal(data, &runtime); err != nil {
 		t.Fatal(err)
 	}
+	// strict_route 在 Windows 上可能让 VirtualBox 等程序工作异常（sing-box 文档），默认不开，只跟随 WebRTC 防泄漏开关。
 	if runtime.Inbounds[0]["strict_route"] != false {
 		t.Fatalf("strict_route=%v want=false", runtime.Inbounds[0]["strict_route"])
 	}
 	addresses := runtime.Inbounds[0]["address"].([]any)
 	if len(addresses) != 1 || addresses[0] != tunIPv4Address(localIPv4s()) {
-		t.Fatalf("tun addresses=%v want IPv4 only by default", runtime.Inbounds[0]["address"])
+		t.Fatalf("tun addresses=%v want IPv4 only when the host has no IPv6 stack", runtime.Inbounds[0]["address"])
 	}
 	rules := runtime.Route["rules"].([]any)
-	if rules[0].(map[string]any)["action"] != "sniff" || rules[2].(map[string]any)["action"] != "resolve" {
-		t.Fatalf("route sniff/resolve actions missing: %+v", rules[:3])
+	if rules[0].(map[string]any)["action"] != "sniff" || rules[1].(map[string]any)["action"] != "hijack-dns" {
+		t.Fatalf("route sniff/hijack actions missing: %+v", rules[:3])
+	}
+	found := false
+	for _, r := range rules {
+		if r.(map[string]any)["action"] == "resolve" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resolve action missing: %+v", rules)
 	}
 }
 
 func TestTUNIPv6FallsBackWhenUnavailable(t *testing.T) {
+	stubIPv6(t, false, true)
 	cfg := testConfig(config.RoutingGlobal)
 	cfg.IPv6Enabled = true
 	data, err := BuildConfig(cfg, "D:\\test")
@@ -542,12 +554,9 @@ func TestTUNIPv6FallsBackWhenUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	addresses := runtime.Inbounds[0]["address"].([]any)
-	want := 1
-	if HasUsableIPv6() {
-		want = 2
-	}
-	if len(addresses) != want {
-		t.Fatalf("tun addresses=%v want %d addresses", addresses, want)
+	// 没有可用 IPv6 也要加 ULA 地址，让 IPv6 路由进 TUN 后被拒绝。
+	if len(addresses) != 2 || addresses[1] != tunIPv6Address {
+		t.Fatalf("tun addresses=%v want IPv4 + ULA", addresses)
 	}
 }
 
@@ -634,6 +643,7 @@ func TestBuildConfigWithAuthProtectsLocalPorts(t *testing.T) {
 }
 
 func TestNodeServersBypassTUNAndResolveLocally(t *testing.T) {
+	stubIPv6(t, true, true)
 	cfg := testConfig(config.RoutingGlobal)
 	cfg.Nodes = append(cfg.Nodes,
 		config.Node{ID: "ip", Name: "ip", Protocol: "socks", Server: "203.0.113.7", Port: 1080},
@@ -683,6 +693,7 @@ func TestNodeServersBypassTUNAndResolveLocally(t *testing.T) {
 // 走 CDN 的节点（ws/grpc 等加 TLS，或 IP 在 Cloudflare 网段）的 IP 不进 route_exclude_address，
 // 否则共用这些 IP 的网站都会绕过 TUN；只让发往它们的 ICMP 直连，Ping 仍能测。
 func TestCDNNodesStayInTUN(t *testing.T) {
+	stubIPv6(t, true, true)
 	uuid := "00000000-0000-0000-0000-000000000001"
 	ws := map[string]string{"uuid": uuid, "tls": "true", "transport_type": "ws", "transport_path": "/ws"}
 	cfg := testConfig(config.RoutingSmart)
@@ -881,4 +892,16 @@ func TestLANProxyInbound(t *testing.T) {
 	if _, err := BuildConfig(cfg, t.TempDir()); err == nil {
 		t.Fatal("username without password should be rejected")
 	}
+}
+
+// withoutIPv6Reject 去掉 IPv6 关闭时插入的 {"ip_version":6,"action":"reject"}，方便按位置检查其余规则。
+func withoutIPv6Reject(rules []any) []any {
+	out := make([]any, 0, len(rules))
+	for _, r := range rules {
+		if m, ok := r.(map[string]any); ok && m["ip_version"] == float64(6) && m["action"] == "reject" {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }

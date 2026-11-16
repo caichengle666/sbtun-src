@@ -2,18 +2,12 @@ package capture
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -74,6 +68,11 @@ type Status struct {
 	MaxFlows                 int    `json:"max_flows"`
 	Unsaved                  bool   `json:"unsaved"`
 	Message                  string `json:"message"`
+	// CertificateStillTrusted 表示分析器已停止但根证书仍在系统信任中。
+	// 关闭抓包不会自动卸载证书，需要用户手动卸载。
+	CertificateStillTrusted bool `json:"certificate_still_trusted"`
+	// CertificateNotice 是关于分析证书的提示（仍被信任、已重新生成等）。
+	CertificateNotice string `json:"certificate_notice,omitempty"`
 }
 
 type pendingFlow struct {
@@ -100,6 +99,8 @@ type Manager struct {
 	dirty     bool
 	lastError string
 	tlsBypass map[string]time.Time
+	// caNotice 记录 CA 被重新生成等需要提示用户的情况。
+	caNotice string
 
 	// auth protects both the local analysis proxy and the sing-box
 	// capture-upstream inbound, so other local programs cannot use them as an
@@ -458,6 +459,7 @@ func (m *Manager) Status(enabled bool) Status {
 		address = m.listener.Addr().String()
 	}
 	running := m.server != nil
+	caNotice := m.caNotice
 	m.mu.RUnlock()
 	if !running {
 		if data, err := os.ReadFile(m.runningMarkerPath()); err == nil {
@@ -468,9 +470,20 @@ func (m *Manager) Status(enabled bool) Status {
 			}
 		}
 	}
+	installed := systemMarkerErr == nil || userMarkerErr == nil
+	notice := caNotice
+	if installed && !running {
+		hint := "分析器已停止，但分析根证书仍被系统信任；不再使用时请手动卸载证书"
+		if notice != "" {
+			notice += "；" + hint
+		} else {
+			notice = hint
+		}
+	}
 	return Status{
+		CertificateStillTrusted: installed && !running, CertificateNotice: notice,
 		Enabled: enabled, Running: running, Address: address,
-		CertificatePath: m.certPath(), CertificateInstalled: systemMarkerErr == nil || userMarkerErr == nil,
+		CertificatePath: m.certPath(), CertificateInstalled: installed,
 		UserCertificate: userMarkerErr == nil, SystemCertificate: systemMarkerErr == nil,
 		UserCertificateSupported: userCertificateSupported(),
 		CertificateLevel:         certificateLevel(systemMarkerErr == nil, userMarkerErr == nil),
@@ -518,76 +531,39 @@ func (m *Manager) isTLSBypassed(host string) bool {
 func (m *Manager) InstallCertificate(level string) error {
 	level = normalizeCertificateLevel(level)
 	m.mu.Lock()
-	_, err := m.ensureCA()
+	ca, err := m.ensureCA()
 	m.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	if err := installCertificate(m.certPath(), level); err != nil {
+	// 安装用内存里已校验过的证书字节，不从可能被替换的路径重新读取。
+	der := append([]byte(nil), ca.Certificate[0]...)
+	if err := installCertificate(der, level); err != nil {
 		return err
 	}
-	return os.WriteFile(m.installMarkerPath(level), []byte(time.Now().Format(time.RFC3339)), 0o600)
+	m.mu.Lock()
+	m.caNotice = ""
+	m.mu.Unlock()
+	return writeFileReplace(m.installMarkerPath(level), []byte(caFingerprint(der)+"\n"), true)
 }
 
+// UninstallCertificate 按名称从系统信任中删除分析 CA，然后删除本地的私钥和证书。
+// 下次启动分析器时会生成新的 CA。
 func (m *Manager) UninstallCertificate(level string) error {
 	level = normalizeCertificateLevel(level)
-	if err := uninstallCertificate(m.certPath(), level); err != nil {
+	if err := uninstallCertificate(level); err != nil {
 		return err
 	}
 	if err := os.Remove(m.installMarkerPath(level)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.caNotice = ""
+	if err := m.removeLocalCA(); err != nil {
+		return fmt.Errorf("系统信任已移除，但删除本地分析证书失败: %w", err)
+	}
 	return nil
-}
-
-func (m *Manager) ensureCA() (tls.Certificate, error) {
-	if err := os.MkdirAll(m.workDir, 0o700); err != nil {
-		return tls.Certificate{}, fmt.Errorf("创建分析证书目录失败: %w", err)
-	}
-	if cert, err := loadCA(m.certPath(), m.keyPath()); err == nil {
-		return cert, nil
-	}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	now := time.Now()
-	template := x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "sbtun Local Capture CA", Organization: []string{"sbtun"}},
-		NotBefore:    now.Add(-time.Hour), NotAfter: now.AddDate(10, 0, 0),
-		IsCA: true, BasicConstraintsValid: true,
-		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	if err := os.WriteFile(m.certPath(), certPEM, 0o600); err != nil {
-		return tls.Certificate{}, err
-	}
-	if err := os.WriteFile(m.keyPath(), keyPEM, 0o600); err != nil {
-		return tls.Certificate{}, err
-	}
-	return loadCA(m.certPath(), m.keyPath())
-}
-
-func loadCA(certPath, keyPath string) (tls.Certificate, error) {
-	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	if len(cert.Certificate) == 0 {
-		return tls.Certificate{}, errors.New("分析 CA 证书为空")
-	}
-	cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
-	return cert, err
 }
 
 func (m *Manager) certPath() string { return filepath.Join(m.workDir, "sbtun-capture-ca.crt") }

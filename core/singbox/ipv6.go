@@ -3,7 +3,9 @@ package singbox
 import (
 	"fmt"
 	"net"
+	"os"
 	"runtime"
+	"strings"
 
 	"github.com/caichengle666/sbtun/core/tun"
 )
@@ -45,9 +47,74 @@ func HasUsableIPv6() bool {
 	return false
 }
 
-func tunAddresses(ipv6Enabled bool) []string {
+// HasIPv6Stack 报告本机 IPv6 协议栈是否在用：任一非回环网卡（sbtun 自己的 TUN 除外）上有任何 IPv6 地址，
+// 包括链路本地地址。系统彻底关掉 IPv6 时返回 false，这时给 TUN 加 IPv6 地址会失败，也不存在 IPv6 绕过的问题。
+func HasIPv6Stack() bool {
+	if runtime.GOOS == "linux" {
+		if data, err := os.ReadFile("/proc/sys/net/ipv6/conf/all/disable_ipv6"); err == nil && strings.TrimSpace(string(data)) == "1" {
+			return false
+		}
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Name == tun.InterfaceName {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			var ip net.IP
+			switch value := address.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip != nil && ip.To4() == nil && ip.To16() != nil && !ip.IsLoopback() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// 探测函数做成变量，测试时替换。
+var (
+	hostHasUsableIPv6 = HasUsableIPv6
+	hostHasIPv6Stack  = HasIPv6Stack
+)
+
+// ipv6Plan 决定 IPv6 怎么处理。
+//   - active：用户开了 IPv6 且本机确实有可用的公网 IPv6，IPv6 流量照常经 TUN 代理。
+//   - tunIPv6：TUN 是否加 IPv6 地址。只要本机 IPv6 协议栈在用就加（即使 active 为 false），
+//     这样 auto_route 才会把 IPv6 默认路由也指向 TUN；否则关掉 IPv6 时 IPv6 流量和发往 IPv6 DNS 的查询
+//     会直接走物理网卡，暴露真实地址。active 为 false 时由路由规则把 IPv6 目标拒绝、DNS 只回 A 记录。
+type ipv6Plan struct {
+	active  bool
+	tunIPv6 bool
+}
+
+func planIPv6(enabled bool) ipv6Plan {
+	active := enabled && hostHasUsableIPv6()
+	return ipv6Plan{active: active, tunIPv6: active || hostHasIPv6Stack()}
+}
+
+// dnsStrategy 是 DNS 和 resolve 动作用的地址族策略：IPv6 不可用时只要 A 记录，AAAA 一律回空。
+func (p ipv6Plan) dnsStrategy() string {
+	if p.active {
+		return "prefer_ipv4"
+	}
+	return "ipv4_only"
+}
+
+func tunAddresses(plan ipv6Plan) []string {
 	addresses := []string{tunIPv4Address(localIPv4s())}
-	if ipv6Enabled && HasUsableIPv6() {
+	if plan.tunIPv6 {
 		addresses = append(addresses, tunIPv6Address)
 	}
 	return addresses

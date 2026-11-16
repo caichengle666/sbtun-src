@@ -36,11 +36,17 @@ type Manager struct {
 	// running process, or 0 when none is running.
 	generation uint64
 	current    uint64
+	// kill 强制结束进程，为空时用 cmd.Process.Kill（测试注入）。
+	kill func(*exec.Cmd) error
 }
 
-// gracefulStopTimeout is how long sing-box gets to remove its routes, rules
-// and DNS settings after a stop signal before it is killed.
-const gracefulStopTimeout = 3 * time.Second
+var (
+	// gracefulStopTimeout is how long sing-box gets to remove its routes, rules
+	// and DNS settings after a stop signal before it is killed.
+	gracefulStopTimeout = 3 * time.Second
+	// killWaitTimeout 是强杀之后等待进程真正退出的上限；超过就放弃跟踪这个进程。
+	killWaitTimeout = 5 * time.Second
+)
 
 func NewManager() *Manager { return &Manager{exited: make(chan ExitEvent, 1)} }
 
@@ -118,19 +124,23 @@ func (m *Manager) wait(cmd *exec.Cmd, generation uint64) {
 	if m.pidPath != "" {
 		removePIDFile(m.pidPath, cmd.Process.Pid)
 	}
-	expected := m.stopping
-	done := m.done
 	ownsProcess := m.cmd == cmd
+	// 不再归本 Manager 跟踪的进程（Stop 超时后已放弃）退出时不算异常退出，
+	// 也不能动新进程的日志文件和 stopping 标记。
+	expected := m.stopping || !ownsProcess
+	done := m.done
 	if ownsProcess {
 		m.cmd = nil
 		m.done = nil
 		m.current = 0
+		if m.logFile != nil {
+			_ = m.logFile.Close()
+			m.logFile = nil
+		}
+		m.stopping = false
+	} else {
+		done = nil // 已在放弃跟踪时关闭
 	}
-	if m.logFile != nil {
-		_ = m.logFile.Close()
-		m.logFile = nil
-	}
-	m.stopping = false
 	m.mu.Unlock()
 	select {
 	case m.exited <- ExitEvent{Err: err, Expected: expected, Generation: generation}:
@@ -169,21 +179,51 @@ func (m *Manager) Stop() error {
 		case <-timer.C:
 		}
 	}
-	if err := killProcess(m, cmd); err != nil {
-		return err
-	}
-	timer := time.NewTimer(5 * time.Second)
+	killErr := killProcess(m, cmd)
+	timer := time.NewTimer(killWaitTimeout)
 	defer timer.Stop()
 	select {
 	case <-done:
 		return nil
 	case <-timer.C:
-		return fmt.Errorf("等待 sing-box 退出超时")
+	}
+	// 强杀后仍等不到退出（进程卡在内核态、Kill 失败等）：放弃跟踪，清空状态，
+	// 否则下次 Start 会一直以为它还在运行。pid 文件保留，下次 Start 的残留清理会再试着结束它。
+	m.abandon(cmd)
+	if killErr != nil {
+		return fmt.Errorf("强制结束 sing-box 失败: %w", killErr)
+	}
+	return fmt.Errorf("sing-box 强制结束后 %s 内仍未退出，已放弃等待", killWaitTimeout)
+}
+
+// abandon 不再跟踪 cmd：清空运行状态并通知等待者。cmd 之后真正退出时 wait 只按预期退出上报。
+func (m *Manager) abandon(cmd *exec.Cmd) {
+	m.mu.Lock()
+	if m.cmd != cmd {
+		m.mu.Unlock()
+		return
+	}
+	done := m.done
+	m.cmd = nil
+	m.done = nil
+	m.current = 0
+	m.stopping = false
+	if m.logFile != nil {
+		_ = m.logFile.Close()
+		m.logFile = nil
+	}
+	m.mu.Unlock()
+	if done != nil {
+		close(done)
 	}
 }
 
 func killProcess(m *Manager, cmd *exec.Cmd) error {
-	if err := cmd.Process.Kill(); err != nil {
+	kill := m.kill
+	if kill == nil {
+		kill = func(cmd *exec.Cmd) error { return cmd.Process.Kill() }
+	}
+	if err := kill(cmd); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
 			return nil
 		}

@@ -180,7 +180,8 @@ func openNoUserSymlinks(path string) (int, error) {
 				unix.Close(dirfd)
 				return -1, errSymlinkRefused
 			}
-			if int(st.Uid) != trustedUID {
+			// 真正的 root（uid 0）建的链接总是可信，例如 macOS 的 /var → /private/var。
+			if st.Uid != 0 && int(st.Uid) != trustedUID {
 				unix.Close(dirfd)
 				return -1, fmt.Errorf("%w：路径中的 %s 是普通用户建的符号链接", errSymlinkRefused, name)
 			}
